@@ -25,7 +25,23 @@ class ConfigurationTests(unittest.TestCase):
         candidate["creators"] = [{"name": "Durandian", "url": "https://youtube.com/@durandian", "enabled": True}]
         result = app.validate_config(candidate)
         self.assertEqual(result["max_height"], 1080)
+        self.assertEqual(result["move_to_dir"], "")
         self.assertTrue(result["creators"][0]["url"].endswith("/videos"))
+
+    def test_validates_move_destination(self):
+        candidate = app.default_config()
+        candidate["move_to_dir"] = "/mnt/plexmediaserver/Media/FromYouTube"
+        result = app.validate_config(candidate)
+        self.assertEqual(result["move_to_dir"], candidate["move_to_dir"])
+
+    def test_rejects_relative_or_overlapping_move_destination(self):
+        candidate = app.default_config()
+        candidate["move_to_dir"] = "Media/FromYouTube"
+        with self.assertRaisesRegex(ValueError, "absolute mounted path"):
+            app.validate_config(candidate)
+        candidate["move_to_dir"] = str(Path(candidate["download_dir"]) / "network")
+        with self.assertRaisesRegex(ValueError, "must not overlap"):
+            app.validate_config(candidate)
 
     def test_status_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -53,6 +69,66 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertEqual(app.status_snapshot()["state"], "downloaded")
             finally:
                 app.STATUS_FILE = original
+
+    def test_moves_pending_video_and_preserves_creator_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "downloads"
+            destination_root = root / "network"
+            source = source_root / "Durandian" / "video.mp4"
+            source.parent.mkdir(parents=True)
+            destination_root.mkdir()
+            source.write_bytes(b"video data")
+            original_status = app.STATUS_FILE
+            app.STATUS_FILE = root / "status.json"
+            try:
+                moved, errors = app.move_pending_videos(
+                    {"download_dir": str(source_root), "move_to_dir": str(destination_root)}
+                )
+            finally:
+                app.STATUS_FILE = original_status
+            self.assertEqual((moved, errors), (1, []))
+            self.assertFalse(source.exists())
+            self.assertEqual((destination_root / "Durandian" / "video.mp4").read_bytes(), b"video data")
+
+    def test_move_does_not_overwrite_existing_video(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "downloads"
+            destination_root = root / "network"
+            source = source_root / "Creator" / "video.mp4"
+            target = destination_root / "Creator" / "video.mp4"
+            source.parent.mkdir(parents=True)
+            target.parent.mkdir(parents=True)
+            source.write_bytes(b"new")
+            target.write_bytes(b"existing")
+            original_status = app.STATUS_FILE
+            app.STATUS_FILE = root / "status.json"
+            try:
+                moved, errors = app.move_pending_videos(
+                    {"download_dir": str(source_root), "move_to_dir": str(destination_root)}
+                )
+            finally:
+                app.STATUS_FILE = original_status
+            self.assertEqual(moved, 0)
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(source.read_bytes(), b"new")
+            self.assertEqual(target.read_bytes(), b"existing")
+
+    def test_unavailable_destination_leaves_video_local(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "downloads"
+            source = source_root / "Creator" / "video.mp4"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"video")
+            moved, errors = app.move_pending_videos(
+                {"download_dir": str(source_root), "move_to_dir": str(root / "missing-share")}
+            )
+            self.assertEqual(moved, 0)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("unavailable", errors[0])
+            self.assertTrue(source.exists())
 
 if __name__ == "__main__":
     unittest.main()

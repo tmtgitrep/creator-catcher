@@ -1,10 +1,13 @@
 #!/bin/sh
 set -eu
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${1:-0.1.0}
+VERSION=${1:-0.2.0}
 OUTPUT_DIR="$PROJECT_DIR/dist"
-STAGE=$(mktemp -d)
-trap 'rm -rf -- "$STAGE"' EXIT HUP INT TERM
+WORK_DIR=$(mktemp -d)
+STAGE="$WORK_DIR/root"
+DEB_PARTS="$WORK_DIR/deb-parts"
+trap 'rm -rf -- "$WORK_DIR"' EXIT HUP INT TERM
+mkdir -p "$STAGE" "$DEB_PARTS"
 chmod 0755 "$STAGE"
 
 install -d "$STAGE/DEBIAN" "$STAGE/usr/bin"
@@ -40,16 +43,29 @@ Section: video
 Priority: optional
 Architecture: all
 Maintainer: tmtgitrep <tmtgitrep@users.noreply.github.com>
-Depends: python3 (>= 3.11), ffmpeg, ca-certificates, systemd
+Depends: python3 (>= 3.11), ffmpeg, ca-certificates, cifs-utils, systemd
 Description: Monitor and download authorized creator videos
  Creator Catcher provides a private web interface, scheduled channel checks,
- download progress, and duplicate protection using yt-dlp.
+ download progress, duplicate protection, and post-download network transfers.
 EOF
 printf '/etc/default/creator-catcher\n' >"$STAGE/DEBIAN/conffiles"
 install -m 0755 "$PROJECT_DIR/packaging/debian/postinst" "$STAGE/DEBIAN/postinst"
 install -m 0755 "$PROJECT_DIR/packaging/debian/prerm" "$STAGE/DEBIAN/prerm"
 install -m 0755 "$PROJECT_DIR/packaging/debian/postrm" "$STAGE/DEBIAN/postrm"
 mkdir -p "$OUTPUT_DIR"
-dpkg-deb --root-owner-group --build "$STAGE" "$OUTPUT_DIR/creator-catcher_${VERSION}_all.deb"
+PACKAGE_FILE="$OUTPUT_DIR/creator-catcher_${VERSION}_all.deb"
+if command -v dpkg-deb >/dev/null 2>&1; then
+    dpkg-deb --root-owner-group --build "$STAGE" "$PACKAGE_FILE"
+else
+    TEMP_PACKAGE="$WORK_DIR/creator-catcher.deb"
+    printf '2.0\n' >"$DEB_PARTS/debian-binary"
+    tar --sort=name --owner=0 --group=0 --numeric-owner \
+        -C "$STAGE/DEBIAN" -cJf "$DEB_PARTS/control.tar.xz" .
+    tar --sort=name --owner=0 --group=0 --numeric-owner \
+        --exclude='./DEBIAN' -C "$STAGE" -cJf "$DEB_PARTS/data.tar.xz" .
+    ar cr "$TEMP_PACKAGE" \
+        "$DEB_PARTS/debian-binary" "$DEB_PARTS/control.tar.xz" "$DEB_PARTS/data.tar.xz"
+    mv "$TEMP_PACKAGE" "$PACKAGE_FILE"
+fi
 cd "$OUTPUT_DIR"
 sha256sum "creator-catcher_${VERSION}_all.deb" >"creator-catcher_${VERSION}_all.deb.sha256"

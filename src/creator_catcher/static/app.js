@@ -36,6 +36,7 @@ function creatorElement(creator, index) {
 }
 function renderConfig() {
   byId("download-dir").value = config.download_dir;
+  byId("move-to-dir").value = config.move_to_dir || "";
   byId("lookback").value = String(config.lookback_days);
   byId("maximum").value = String(config.max_per_creator);
   byId("height").value = String(config.max_height);
@@ -66,7 +67,7 @@ async function pollStatus() {
     const progress = byId("progress");
     if (status.percent === null || status.percent === undefined) progress.removeAttribute("value");
     else progress.value = Number(status.percent);
-    byId("scan").disabled = ["checking","downloading"].includes(status.state);
+    byId("scan").disabled = ["checking","downloading","moving"].includes(status.state);
   } catch (error) {
     byId("status-headline").textContent = "Connection lost";
     byId("status-detail").textContent = error.message;
@@ -80,6 +81,7 @@ byId("add-creator").addEventListener("submit", async (event) => {
 byId("settings").addEventListener("submit", async (event) => {
   event.preventDefault();
   config.download_dir = byId("download-dir").value;
+  config.move_to_dir = byId("move-to-dir").value;
   config.lookback_days = Number(byId("lookback").value);
   config.max_per_creator = Number(byId("maximum").value);
   config.max_height = Number(byId("height").value);

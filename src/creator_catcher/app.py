@@ -18,7 +18,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 STATE_DIR = Path(os.environ.get("CREATOR_CATCHER_STATE_DIR", "/var/lib/creator-catcher"))
@@ -27,11 +27,13 @@ STATUS_FILE = STATE_DIR / "status.json"
 ARCHIVE_FILE = STATE_DIR / "download-archive.txt"
 LOCK_FILE = STATE_DIR / "scan.lock"
 CONFIG_LOCK = threading.RLock()
+VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 
 
 def default_config() -> dict:
     return {
         "download_dir": str(STATE_DIR / "downloads"),
+        "move_to_dir": "",
         "lookback_days": 2,
         "max_per_creator": 20,
         "max_height": 1080,
@@ -85,6 +87,19 @@ def validate_config(candidate: dict) -> dict:
     download_dir = Path(str(candidate.get("download_dir", ""))).expanduser()
     if not download_dir.is_absolute():
         raise ValueError("Download directory must be an absolute path.")
+    move_to_value = str(candidate.get("move_to_dir", "")).strip()
+    move_to_dir = Path(move_to_value).expanduser() if move_to_value else None
+    if move_to_dir is not None:
+        if not move_to_dir.is_absolute():
+            raise ValueError("Move-to directory must be an absolute mounted path.")
+        download_resolved = download_dir.resolve(strict=False)
+        move_to_resolved = move_to_dir.resolve(strict=False)
+        if (
+            download_resolved == move_to_resolved
+            or download_resolved in move_to_resolved.parents
+            or move_to_resolved in download_resolved.parents
+        ):
+            raise ValueError("Download and move-to directories must not overlap.")
     lookback = int(candidate.get("lookback_days", 2))
     maximum = int(candidate.get("max_per_creator", 20))
     height = int(candidate.get("max_height", 1080))
@@ -114,6 +129,7 @@ def validate_config(candidate: dict) -> dict:
 
     return {
         "download_dir": str(download_dir),
+        "move_to_dir": str(move_to_dir) if move_to_dir is not None else "",
         "lookback_days": lookback,
         "max_per_creator": maximum,
         "max_height": height,
@@ -241,6 +257,86 @@ def parse_progress_line(line: str, download_count: int) -> int:
     return download_count
 
 
+def move_pending_videos(config: dict) -> tuple[int, list[str]]:
+    """Move completed local videos into the configured destination.
+
+    Files retain their path relative to the download directory, which keeps
+    creator folders intact. A temporary file and atomic rename prevent Plex
+    from seeing a partially copied video on a network filesystem.
+    """
+    destination_value = config.get("move_to_dir", "")
+    if not destination_value:
+        return 0, []
+
+    source_root = Path(config["download_dir"])
+    destination_root = Path(destination_value)
+    if not destination_root.is_dir():
+        return 0, [f"move destination is unavailable: {destination_root}"]
+    videos = sorted(
+        path
+        for path in source_root.rglob("*")
+        if path.is_file() and not path.is_symlink() and path.suffix.lower() in VIDEO_EXTENSIONS
+    )
+    moved = 0
+    errors: list[str] = []
+    for position, source in enumerate(videos, 1):
+        relative = source.relative_to(source_root)
+        target = destination_root / relative
+        temporary = target.with_name(f".{target.name}.creator-catcher-part")
+        update_status(
+            state="moving",
+            headline=f"Moving {source.name}",
+            detail=f"Sending to {destination_root}…",
+            percent=round((position - 1) * 100 / len(videos), 1),
+            move_position=position,
+            move_total=len(videos),
+            moved_count=moved,
+        )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                raise FileExistsError(f"destination already exists: {target}")
+            temporary.unlink(missing_ok=True)
+            total_bytes = source.stat().st_size
+            copied_bytes = 0
+            with source.open("rb") as source_file, temporary.open("wb") as target_file:
+                while chunk := source_file.read(4 * 1024 * 1024):
+                    target_file.write(chunk)
+                    copied_bytes += len(chunk)
+                    update_status(
+                        state="moving",
+                        headline=f"Moving {source.name}",
+                        detail=f"{copied_bytes / 1048576:.1f} of {total_bytes / 1048576:.1f} MiB",
+                        percent=round(copied_bytes * 100 / total_bytes, 1) if total_bytes else 100,
+                        move_position=position,
+                        move_total=len(videos),
+                        moved_count=moved,
+                    )
+                target_file.flush()
+                os.fsync(target_file.fileno())
+            try:
+                shutil.copystat(source, temporary)
+            except OSError:
+                pass
+            os.replace(temporary, target)
+            source.unlink()
+            moved += 1
+        except OSError as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            errors.append(f"{relative}: {exc}")
+
+    for directory in sorted(source_root.rglob("*"), key=lambda path: len(path.parts), reverse=True):
+        if directory.is_dir():
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+    return moved, errors
+
+
 def scan() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w", encoding="utf-8") as lock:
@@ -300,22 +396,31 @@ def scan() -> int:
                         download_count=download_count,
                     )
 
+            moved_count, move_errors = move_pending_videos(config)
             noun = "video" if download_count == 1 else "videos"
-            if failures:
+            moved_noun = "video" if moved_count == 1 else "videos"
+            if failures or move_errors:
+                problem_count = failures + len(move_errors)
+                error_detail = move_errors[0] if move_errors else f"{failures} creator checks failed."
                 update_status(
                     state="error",
                     headline="Scan finished with errors",
-                    detail=f"Downloaded {download_count} new {noun}; {failures} creator checks failed.",
+                    detail=(
+                        f"Downloaded {download_count} new {noun}; moved {moved_count} {moved_noun}. "
+                        f"{problem_count} problem(s): {error_detail}"
+                    ),
                     percent=None,
                     download_count=download_count,
+                    moved_count=moved_count,
                 )
                 return 1
             update_status(
                 state="complete",
                 headline="Scan complete",
-                detail=f"Downloaded {download_count} new {noun}.",
+                detail=f"Downloaded {download_count} new {noun}; moved {moved_count} {moved_noun}.",
                 percent=100,
                 download_count=download_count,
+                moved_count=moved_count,
             )
             return 0
         except Exception as exc:
