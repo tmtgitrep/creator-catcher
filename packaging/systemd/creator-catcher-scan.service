@@ -1,0 +1,18 @@
+[Unit]
+Description=Scan Creator Catcher channels
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=creator-catcher
+Group=creator-catcher
+EnvironmentFile=-/etc/default/creator-catcher
+ExecStart=/usr/bin/creator-catcher scan
+StateDirectory=creator-catcher
+WorkingDirectory=/var/lib/creator-catcher
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/creator-catcher

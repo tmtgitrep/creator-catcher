@@ -1,0 +1,5 @@
+# The package listens only on the Pi until you deliberately change this.
+# For Tailscale-only access, set this to the Pi's 100.x address.
+CREATOR_CATCHER_HOST=127.0.0.1
+CREATOR_CATCHER_PORT=8080
+CREATOR_CATCHER_YTDLP=/usr/lib/creator-catcher/vendor/yt-dlp

@@ -1,0 +1,23 @@
+[Unit]
+Description=Creator Catcher web interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=creator-catcher
+Group=creator-catcher
+EnvironmentFile=-/etc/default/creator-catcher
+ExecStart=/usr/bin/creator-catcher serve
+Restart=on-failure
+RestartSec=5s
+StateDirectory=creator-catcher
+WorkingDirectory=/var/lib/creator-catcher
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/creator-catcher
+
+[Install]
+WantedBy=multi-user.target

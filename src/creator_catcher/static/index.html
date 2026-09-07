@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Creator Catcher</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>Creator Catcher</h1><p>Automatic downloads from creators you follow</p></div>
+      <button id="scan" class="primary">Scan now</button>
+    </header>
+    <section class="card status-card">
+      <div class="section-title">Status</div>
+      <h2 id="status-headline">Loading…</h2>
+      <p id="status-detail">Reading scanner status.</p>
+      <progress id="progress" max="100" value="0"></progress>
+    </section>
+    <section class="card">
+      <div class="section-heading">
+        <div><div class="section-title">Creators</div><p>Add a channel URL ending in /videos, /shorts, or /streams.</p></div>
+      </div>
+      <form id="add-creator" class="add-grid">
+        <label>Name<input id="new-name" maxlength="120" required placeholder="Creator name"></label>
+        <label>YouTube URL<input id="new-url" required placeholder="https://youtube.com/@creator"></label>
+        <button type="submit">Add creator</button>
+      </form>
+      <div id="creators" class="creator-list"></div>
+    </section>
+    <section class="card">
+      <div class="section-title">Download settings</div>
+      <form id="settings" class="settings-grid">
+        <label class="wide">Download directory<input id="download-dir" required></label>
+        <label>Look back
+          <select id="lookback"><option value="1">1 day</option><option value="2">2 days</option><option value="3">3 days</option><option value="7">7 days</option><option value="14">14 days</option><option value="30">30 days</option></select>
+        </label>
+        <label>Check per creator<input id="maximum" type="number" min="1" max="100" required></label>
+        <label>Maximum resolution
+          <select id="height"><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="2160">2160p</option></select>
+        </label>
+        <button type="submit" class="primary">Save settings</button>
+      </form>
+      <p id="message" role="status"></p>
+    </section>
+  </main>
+</body>
+</html>

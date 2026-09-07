@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+systemd-sysusers /usr/lib/sysusers.d/creator-catcher.conf
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/creator-catcher.conf
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable --now creator-catcher-web.service creator-catcher-scan.timer
+fi
