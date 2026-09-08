@@ -1,5 +1,6 @@
 "use strict";
 let config = null;
+let lastStatusState = null;
 const byId = (id) => document.getElementById(id);
 
 async function api(path, options) {
@@ -28,11 +29,32 @@ function creatorElement(creator, index) {
   const url = document.createElement("input");
   url.className = "url"; url.value = creator.url; url.ariaLabel = "Creator URL";
   url.addEventListener("change", () => { config.creators[index].url = url.value; saveConfig(); });
+  const count = document.createElement("span");
+  count.className = "download-count";
+  const total = Number(creator.download_count || 0);
+  const recent = Number(creator.last_scan_download_count || 0);
+  count.textContent = `${total} total · ${recent} last scan`;
+  count.title = "Videos downloaded since Creator Catcher 0.3.0";
   const remove = document.createElement("button");
   remove.type = "button"; remove.className = "danger"; remove.textContent = "Remove";
   remove.addEventListener("click", () => { config.creators.splice(index, 1); saveConfig(); });
-  row.append(enabled, name, url, remove);
+  row.append(enabled, name, url, count, remove);
   return row;
+}
+function renderErrors(errors) {
+  const details = byId("scan-errors");
+  const list = byId("error-list");
+  const entries = Array.isArray(errors) ? errors : [];
+  list.replaceChildren();
+  details.hidden = entries.length === 0;
+  byId("error-summary").textContent = `${entries.length} ${entries.length === 1 ? "error" : "errors"} from the last scan`;
+  entries.forEach((error) => {
+    const item = document.createElement("li");
+    const context = [error.creator, error.stage].filter(Boolean).join(" · ");
+    item.textContent = `${context ? context + ": " : ""}${error.message || String(error)}`;
+    list.append(item);
+  });
+  if (!entries.length) details.open = false;
 }
 function renderConfig() {
   byId("download-dir").value = config.download_dir;
@@ -67,7 +89,13 @@ async function pollStatus() {
     const progress = byId("progress");
     if (status.percent === null || status.percent === undefined) progress.removeAttribute("value");
     else progress.value = Number(status.percent);
-    byId("scan").disabled = ["checking","downloading","moving"].includes(status.state);
+    const runningStates = ["checking","downloading","downloaded","moving"];
+    const finishedStates = ["complete","error","idle"];
+    const wasRunning = runningStates.includes(lastStatusState);
+    byId("scan").disabled = runningStates.includes(status.state);
+    renderErrors(status.errors);
+    if (finishedStates.includes(status.state) && wasRunning) await loadConfig();
+    lastStatusState = status.state;
   } catch (error) {
     byId("status-headline").textContent = "Connection lost";
     byId("status-detail").textContent = error.message;

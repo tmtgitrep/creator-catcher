@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -18,16 +19,19 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 STATE_DIR = Path(os.environ.get("CREATOR_CATCHER_STATE_DIR", "/var/lib/creator-catcher"))
 CONFIG_FILE = STATE_DIR / "config.json"
 STATUS_FILE = STATE_DIR / "status.json"
+STATS_FILE = STATE_DIR / "stats.json"
 ARCHIVE_FILE = STATE_DIR / "download-archive.txt"
 LOCK_FILE = STATE_DIR / "scan.lock"
 CONFIG_LOCK = threading.RLock()
+STATS_LOCK = threading.RLock()
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
+MAX_ERRORS = 100
 
 
 def default_config() -> dict:
@@ -144,19 +148,95 @@ def save_config(candidate: dict) -> dict:
     return config
 
 
+def load_stats() -> dict:
+    with STATS_LOCK:
+        if not STATS_FILE.exists():
+            return {"creators": {}}
+        try:
+            loaded = json.loads(STATS_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Cannot read download statistics: {exc}") from exc
+        creators = loaded.get("creators", {}) if isinstance(loaded, dict) else {}
+        if not isinstance(creators, dict):
+            raise RuntimeError("Cannot read download statistics: creators must be an object.")
+        normalized = {}
+        for url, values in creators.items():
+            if not isinstance(values, dict):
+                continue
+            normalized[str(url)] = {
+                "downloaded": max(0, int(values.get("downloaded", 0))),
+                "last_scan": max(0, int(values.get("last_scan", 0))),
+            }
+        return {"creators": normalized}
+
+
+def save_stats(stats: dict) -> None:
+    with STATS_LOCK:
+        atomic_json_write(STATS_FILE, stats)
+
+
+def begin_scan_stats(config: dict) -> None:
+    with STATS_LOCK:
+        stats = load_stats()
+        for creator in config["creators"]:
+            entry = stats["creators"].setdefault(creator["url"], {"downloaded": 0, "last_scan": 0})
+            entry["last_scan"] = 0
+        save_stats(stats)
+
+
+def record_creator_downloads(url: str, count: int) -> None:
+    count = max(0, int(count))
+    with STATS_LOCK:
+        stats = load_stats()
+        entry = stats["creators"].setdefault(url, {"downloaded": 0, "last_scan": 0})
+        entry["downloaded"] += count
+        entry["last_scan"] += count
+        save_stats(stats)
+
+
+def config_for_api(config: dict | None = None) -> dict:
+    config = config or load_config()
+    stats = load_stats()["creators"]
+    return {
+        **config,
+        "creators": [
+            {
+                **creator,
+                "download_count": stats.get(creator["url"], {}).get("downloaded", 0),
+                "last_scan_download_count": stats.get(creator["url"], {}).get("last_scan", 0),
+            }
+            for creator in config["creators"]
+        ],
+    }
+
+
+def default_status() -> dict:
+    return {
+        "state": "idle",
+        "headline": "Ready",
+        "detail": "Press Scan now to check for new videos.",
+        "percent": None,
+        "download_count": 0,
+        "errors": [],
+    }
+
+
 def status_snapshot() -> dict:
     if not STATUS_FILE.exists():
-        return {
-            "state": "idle",
-            "headline": "Ready",
-            "detail": "Press Scan now to check for new videos.",
-            "percent": None,
-            "download_count": 0,
-        }
+        return default_status()
     try:
-        return json.loads(STATUS_FILE.read_text(encoding="utf-8"))
+        status = default_status()
+        status.update(json.loads(STATUS_FILE.read_text(encoding="utf-8")))
+        if not isinstance(status["errors"], list):
+            status["errors"] = []
+        return status
     except (OSError, json.JSONDecodeError):
-        return {"state": "error", "headline": "Status unavailable", "detail": "", "percent": None}
+        return {
+            **default_status(),
+            "state": "error",
+            "headline": "Status unavailable",
+            "detail": "",
+        }
 
 
 def update_status(**fields: object) -> dict:
@@ -196,10 +276,15 @@ def scanner_command(config: dict, creator: dict) -> list[str]:
         f"bv*[height<={height}]+ba/b[height<={height}]/b",
         "--merge-output-format",
         "mp4",
+        "--embed-metadata",
+        "--embed-thumbnail",
+        "--embed-chapters",
+        "--parse-metadata",
+        "%(channel|)s:%(meta_artist)s",
         "--paths",
         config["download_dir"],
         "--output",
-        "%(channel)s/%(upload_date)s - %(title).180B [%(id)s].%(ext)s",
+        "%(channel)s/%(channel)s - %(upload_date>%Y-%m-%d)s - %(title).130B [%(id)s].%(ext)s",
         "--newline",
         "--progress",
         "--progress-delta",
@@ -257,6 +342,38 @@ def parse_progress_line(line: str, download_count: int) -> int:
     return download_count
 
 
+def truncate_utf8(value: str, maximum_bytes: int) -> str:
+    return value.encode("utf-8")[:maximum_bytes].decode("utf-8", errors="ignore").rstrip(" .-")
+
+
+def plex_filename(creator: str, filename: str) -> str:
+    """Prefix a video filename with its creator while preserving its ID."""
+    path = Path(filename)
+    prefix = f"{creator} - "
+    if path.stem.casefold().startswith(prefix.casefold()):
+        return filename
+
+    identifier_match = re.search(r"( \[[^\[\]]+\])$", path.stem)
+    identifier = identifier_match.group(1) if identifier_match else ""
+    original_stem = path.stem[: -len(identifier)] if identifier else path.stem
+    maximum_stem_bytes = 240 - len(path.suffix.encode("utf-8")) - len(identifier.encode("utf-8"))
+    stem = truncate_utf8(prefix + original_stem, maximum_stem_bytes)
+    return f"{stem}{identifier}{path.suffix}"
+
+
+def plex_relative_path(source: Path, source_root: Path) -> Path:
+    relative = source.relative_to(source_root)
+    if len(relative.parts) < 2:
+        return relative
+    creator = relative.parts[0]
+    return Path(*relative.parts[:-1], plex_filename(creator, relative.name))
+
+
+def error_record(stage: str, message: str, creator: str = "") -> dict:
+    cleaned = re.sub(r"^(?:ERROR|WARNING):\s*", "", message.strip())
+    return {"stage": stage, "creator": creator, "message": cleaned[:2000]}
+
+
 def move_pending_videos(config: dict) -> tuple[int, list[str]]:
     """Move completed local videos into the configured destination.
 
@@ -280,8 +397,9 @@ def move_pending_videos(config: dict) -> tuple[int, list[str]]:
     moved = 0
     errors: list[str] = []
     for position, source in enumerate(videos, 1):
-        relative = source.relative_to(source_root)
-        target = destination_root / relative
+        source_relative = source.relative_to(source_root)
+        destination_relative = plex_relative_path(source, source_root)
+        target = destination_root / destination_relative
         temporary = target.with_name(f".{target.name}.creator-catcher-part")
         update_status(
             state="moving",
@@ -326,7 +444,7 @@ def move_pending_videos(config: dict) -> tuple[int, list[str]]:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
-            errors.append(f"{relative}: {exc}")
+            errors.append(f"{source_relative}: {exc}")
 
     for directory in sorted(source_root.rglob("*"), key=lambda path: len(path.parts), reverse=True):
         if directory.is_dir():
@@ -346,10 +464,13 @@ def scan() -> int:
             print("A scan is already running.", flush=True)
             return 0
 
+        scan_errors: list[dict] = []
         try:
             config = load_config()
             Path(config["download_dir"]).mkdir(parents=True, exist_ok=True)
             enabled = [creator for creator in config["creators"] if creator["enabled"]]
+            begin_scan_stats(config)
+            update_status(errors=[], download_count=0, moved_count=0)
             if not enabled:
                 update_status(
                     state="idle",
@@ -357,12 +478,14 @@ def scan() -> int:
                     detail="Add or enable a creator first.",
                     percent=None,
                     download_count=0,
+                    errors=[],
                 )
                 return 0
 
             failures = 0
             download_count = 0
             for position, creator in enumerate(enabled, 1):
+                creator_start_count = download_count
                 update_status(
                     state="checking",
                     headline=f"Checking {creator['name']}",
@@ -381,22 +504,36 @@ def scan() -> int:
                 )
                 assert process.stdout is not None
                 recent_warning = ""
+                creator_errors = []
                 for line in process.stdout:
                     print(line, end="", flush=True)
                     download_count = parse_progress_line(line, download_count)
+                    if line.startswith("ERROR:"):
+                        creator_errors.append(line.strip())
                     if line.startswith(("ERROR:", "WARNING:")):
                         recent_warning = line.strip()
-                if process.wait() != 0:
+                return_code = process.wait()
+                creator_downloads = download_count - creator_start_count
+                record_creator_downloads(creator["url"], creator_downloads)
+                if return_code != 0 or creator_errors:
                     failures += 1
+                    messages = creator_errors or [recent_warning or "yt-dlp returned an error."]
+                    for message in messages:
+                        if len(scan_errors) < MAX_ERRORS:
+                            scan_errors.append(error_record("download", message, creator["name"]))
                     update_status(
-                        state="error",
+                        state="checking",
                         headline=f"Could not scan {creator['name']}",
                         detail=recent_warning or "yt-dlp returned an error.",
                         percent=None,
                         download_count=download_count,
+                        errors=scan_errors,
                     )
 
             moved_count, move_errors = move_pending_videos(config)
+            for message in move_errors:
+                if len(scan_errors) < MAX_ERRORS:
+                    scan_errors.append(error_record("move", message))
             noun = "video" if download_count == 1 else "videos"
             moved_noun = "video" if moved_count == 1 else "videos"
             if failures or move_errors:
@@ -412,6 +549,7 @@ def scan() -> int:
                     percent=None,
                     download_count=download_count,
                     moved_count=moved_count,
+                    errors=scan_errors,
                 )
                 return 1
             update_status(
@@ -421,10 +559,19 @@ def scan() -> int:
                 percent=100,
                 download_count=download_count,
                 moved_count=moved_count,
+                errors=[],
             )
             return 0
         except Exception as exc:
-            update_status(state="error", headline="Scan failed", detail=str(exc), percent=None)
+            if len(scan_errors) < MAX_ERRORS:
+                scan_errors.append(error_record("scanner", str(exc)))
+            update_status(
+                state="error",
+                headline="Scan failed",
+                detail=str(exc),
+                percent=None,
+                errors=scan_errors,
+            )
             print(f"Creator Catcher: {exc}", file=sys.stderr)
             return 1
 
@@ -457,7 +604,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/app.js":
             self.send_bytes((STATIC_DIR / "app.js").read_bytes(), "text/javascript; charset=utf-8")
         elif path == "/api/config":
-            self.send_json(load_config())
+            self.send_json(config_for_api())
         elif path == "/api/status":
             self.send_json(status_snapshot())
         elif path == "/health":
@@ -481,7 +628,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             body = self.read_json()
             if path == "/api/config":
-                self.send_json(save_config(body))
+                self.send_json(config_for_api(save_config(body)))
             elif path == "/api/scan":
                 if body != {}:
                     raise ValueError("Scan request must be an empty object.")

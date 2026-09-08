@@ -5,6 +5,10 @@ YouTube creators and downloads new videos with yt-dlp. Only download videos
 that you own or are authorized to copy. Completed videos can optionally be
 moved to a local or mounted network directory while preserving creator folders.
 
+The web interface shows persistent download totals for each creator and keeps
+an expandable list of errors from the most recent scan. Statistics begin when
+version 0.3.0 is installed; earlier downloads are not retroactively counted.
+
 ## Development
 
 Run tests with: make test
@@ -22,11 +26,11 @@ Place the official portable yt-dlp executable at vendor/yt-dlp, then run:
 
 Install on Raspberry Pi OS:
 
-    sudo apt install ./creator-catcher_0.2.0_all.deb
+    sudo apt install ./creator-catcher_0.3.0_all.deb
 
 Verify a downloaded release before installing:
 
-    sha256sum -c creator-catcher_0.2.0_all.deb.sha256
+    sha256sum -c creator-catcher_0.3.0_all.deb.sha256
 
 The service initially listens only at 127.0.0.1:8080. Set
 CREATOR_CATCHER_HOST in /etc/default/creator-catcher to the Pi's Tailscale
@@ -76,9 +80,25 @@ never overwritten. Creator Catcher will not create the move-to root itself; it
 must already exist, which prevents an unavailable mount from silently receiving
 files on the Pi's local disk.
 
+## Plex naming and metadata
+
+New downloads use this structure before they are moved:
+
+    Creator/Creator - YYYY-MM-DD - Video title [YouTube ID].mp4
+
+Pending files downloaded by older releases receive the creator prefix when
+they are moved. The YouTube ID is retained to keep filenames unique. Creator
+Catcher also asks yt-dlp to embed available title, creator/uploader, upload date,
+description, source URL, thumbnail, and chapter metadata in the completed file.
+
+For Plex to use the filename and embedded MP4 metadata, place this content in a
+Personal Media library and enable the local media metadata source. Metadata
+availability depends on the information exposed by YouTube and on the final
+media container.
+
 ## Remote access
 
-The web interface has no application-level login in version 0.2.0. Keep it on
+The web interface has no application-level login in version 0.3.0. Keep it on
 a trusted private network. For a Tailscale installation, bind it only to the
 Pi's Tailscale address in /etc/default/creator-catcher; do not expose port 8080
 through the router. Tailnet ACLs should limit access to trusted devices.

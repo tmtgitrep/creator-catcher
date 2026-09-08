@@ -50,6 +50,7 @@ class ConfigurationTests(unittest.TestCase):
             try:
                 app.update_status(state="checking", headline="Checking test", percent=None)
                 self.assertEqual(app.status_snapshot()["state"], "checking")
+                self.assertEqual(app.status_snapshot()["errors"], [])
             finally:
                 app.STATUS_FILE = original
 
@@ -89,7 +90,10 @@ class ConfigurationTests(unittest.TestCase):
                 app.STATUS_FILE = original_status
             self.assertEqual((moved, errors), (1, []))
             self.assertFalse(source.exists())
-            self.assertEqual((destination_root / "Durandian" / "video.mp4").read_bytes(), b"video data")
+            self.assertEqual(
+                (destination_root / "Durandian" / "Durandian - video.mp4").read_bytes(),
+                b"video data",
+            )
 
     def test_move_does_not_overwrite_existing_video(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -97,7 +101,7 @@ class ConfigurationTests(unittest.TestCase):
             source_root = root / "downloads"
             destination_root = root / "network"
             source = source_root / "Creator" / "video.mp4"
-            target = destination_root / "Creator" / "video.mp4"
+            target = destination_root / "Creator" / "Creator - video.mp4"
             source.parent.mkdir(parents=True)
             target.parent.mkdir(parents=True)
             source.write_bytes(b"new")
@@ -129,6 +133,64 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIn("unavailable", errors[0])
             self.assertTrue(source.exists())
+
+    def test_plex_filename_preserves_youtube_id_and_length(self):
+        filename = "20260908 - " + ("A very long title " * 30) + " [abc123XYZ_-].mp4"
+        result = app.plex_filename("Durandian", filename)
+        self.assertTrue(result.startswith("Durandian - 20260908 - "))
+        self.assertTrue(result.endswith(" [abc123XYZ_-].mp4"))
+        self.assertLessEqual(len(result.encode("utf-8")), 240)
+        self.assertEqual(app.plex_filename("Durandian", result), result)
+
+    def test_scanner_embeds_metadata_and_uses_plex_filename(self):
+        original = app.yt_dlp_executable
+        app.yt_dlp_executable = lambda: "/yt-dlp"
+        try:
+            command = app.scanner_command(
+                app.default_config(),
+                {"url": "https://www.youtube.com/@durandian/videos"},
+            )
+        finally:
+            app.yt_dlp_executable = original
+        self.assertIn("--embed-metadata", command)
+        self.assertIn("--embed-thumbnail", command)
+        self.assertIn("--embed-chapters", command)
+        output = command[command.index("--output") + 1]
+        self.assertIn("%(channel)s/%(channel)s - ", output)
+        self.assertIn("%(upload_date>%Y-%m-%d)s", output)
+
+    def test_records_and_exposes_creator_download_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = app.STATS_FILE
+            app.STATS_FILE = Path(directory) / "stats.json"
+            config = app.default_config()
+            config["creators"] = [
+                {
+                    "name": "Durandian",
+                    "url": "https://www.youtube.com/@durandian/videos",
+                    "enabled": True,
+                }
+            ]
+            try:
+                app.begin_scan_stats(config)
+                app.record_creator_downloads(config["creators"][0]["url"], 2)
+                payload = app.config_for_api(config)
+                app.begin_scan_stats(config)
+                reset_payload = app.config_for_api(config)
+            finally:
+                app.STATS_FILE = original
+            self.assertEqual(payload["creators"][0]["download_count"], 2)
+            self.assertEqual(payload["creators"][0]["last_scan_download_count"], 2)
+            self.assertEqual(reset_payload["creators"][0]["download_count"], 2)
+            self.assertEqual(reset_payload["creators"][0]["last_scan_download_count"], 0)
+
+    def test_error_record_is_structured_and_bounded(self):
+        record = app.error_record("download", "ERROR: " + ("x" * 3000), "Durandian")
+        self.assertEqual(
+            {key: record[key] for key in ("stage", "creator")},
+            {"stage": "download", "creator": "Durandian"},
+        )
+        self.assertEqual(len(record["message"]), 2000)
 
 if __name__ == "__main__":
     unittest.main()
