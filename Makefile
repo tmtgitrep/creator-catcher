@@ -1,5 +1,5 @@
 .PHONY: test package clean
-VERSION ?= 0.3.0
+VERSION ?= 0.3.1
 test:
 	python3 -m unittest discover -s tests -v
 	python3 -m py_compile src/creator_catcher/app.py

@@ -19,7 +19,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 STATE_DIR = Path(os.environ.get("CREATOR_CATCHER_STATE_DIR", "/var/lib/creator-catcher"))

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 SOURCE = Path(__file__).parents[1] / "src" / "creator_catcher" / "app.py"
+PROJECT = Path(__file__).parents[1]
 SPEC = importlib.util.spec_from_file_location("creator_catcher_app", SOURCE)
 app = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -191,6 +192,14 @@ class ConfigurationTests(unittest.TestCase):
             {"stage": "download", "creator": "Durandian"},
         )
         self.assertEqual(len(record["message"]), 2000)
+
+
+class PackagingTests(unittest.TestCase):
+    def test_manual_and_scheduled_scans_can_write_to_mounts(self):
+        expected = "ReadWritePaths=/var/lib/creator-catcher -/mnt -/media -/srv"
+        for unit in ("creator-catcher-web.service", "creator-catcher-scan.service"):
+            contents = (PROJECT / "packaging" / "systemd" / unit).read_text(encoding="utf-8")
+            self.assertIn(expected, contents)
 
 if __name__ == "__main__":
     unittest.main()
