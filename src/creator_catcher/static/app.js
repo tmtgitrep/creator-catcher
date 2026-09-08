@@ -81,16 +81,22 @@ async function saveConfig() {
   }
 }
 async function loadConfig() { config = await api("/api/config"); renderConfig(); }
+async function loadVersion() {
+  const health = await api("/health");
+  byId("app-version").textContent = `v${health.version}`;
+}
 async function pollStatus() {
   try {
     const status = await api("/api/status");
     byId("status-headline").textContent = status.headline || "Ready";
     byId("status-detail").textContent = status.detail || "";
     const progress = byId("progress");
-    if (status.percent === null || status.percent === undefined) progress.removeAttribute("value");
-    else progress.value = Number(status.percent);
     const runningStates = ["checking","downloading","downloaded","moving"];
     const finishedStates = ["complete","error","idle"];
+    if (["complete","error"].includes(status.state)) progress.value = Number(status.percent ?? 100);
+    else if (status.state === "idle") progress.value = 0;
+    else if (status.percent === null || status.percent === undefined) progress.removeAttribute("value");
+    else progress.value = Number(status.percent);
     const wasRunning = runningStates.includes(lastStatusState);
     byId("scan").disabled = runningStates.includes(status.state);
     renderErrors(status.errors);
@@ -121,5 +127,6 @@ byId("scan").addEventListener("click", async () => {
   catch (error) { showMessage(error.message, true); byId("scan").disabled = false; }
 });
 loadConfig().catch((error) => showMessage(error.message, true));
+loadVersion().catch(() => { byId("app-version").textContent = ""; });
 pollStatus();
 setInterval(pollStatus, 1000);

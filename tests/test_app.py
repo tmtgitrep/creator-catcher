@@ -201,5 +201,14 @@ class PackagingTests(unittest.TestCase):
             contents = (PROJECT / "packaging" / "systemd" / unit).read_text(encoding="utf-8")
             self.assertIn(expected, contents)
 
+    def test_ui_loads_version_and_stops_finished_progress(self):
+        static = PROJECT / "src" / "creator_catcher" / "static"
+        markup = (static / "index.html").read_text(encoding="utf-8")
+        script = (static / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="app-version"', markup)
+        self.assertIn('await api("/health")', script)
+        self.assertIn('["complete","error"].includes(status.state)', script)
+        self.assertIn("status.percent ?? 100", script)
+
 if __name__ == "__main__":
     unittest.main()

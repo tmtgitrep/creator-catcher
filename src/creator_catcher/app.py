@@ -19,7 +19,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 STATE_DIR = Path(os.environ.get("CREATOR_CATCHER_STATE_DIR", "/var/lib/creator-catcher"))
@@ -546,7 +546,7 @@ def scan() -> int:
                         f"Downloaded {download_count} new {noun}; moved {moved_count} {moved_noun}. "
                         f"{problem_count} problem(s): {error_detail}"
                     ),
-                    percent=None,
+                    percent=100,
                     download_count=download_count,
                     moved_count=moved_count,
                     errors=scan_errors,
