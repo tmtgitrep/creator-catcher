@@ -17,6 +17,11 @@ function showMessage(text, error) {
   message.textContent = text;
   message.classList.toggle("error", Boolean(error));
 }
+function showHistoryMessage(text, error) {
+  const message = byId("history-message");
+  message.textContent = text;
+  message.classList.toggle("error", Boolean(error));
+}
 function creatorElement(creator, index) {
   const row = document.createElement("div");
   row.className = "creator";
@@ -56,6 +61,20 @@ function renderErrors(errors) {
   });
   if (!entries.length) details.open = false;
 }
+function renderHistoryCreators() {
+  const select = byId("history-creator");
+  const previous = select.value;
+  select.replaceChildren();
+  config.creators.forEach((creator) => {
+    const option = document.createElement("option");
+    option.value = creator.url;
+    option.textContent = creator.name;
+    select.append(option);
+  });
+  if (config.creators.some((creator) => creator.url === previous)) select.value = previous;
+  select.disabled = config.creators.length === 0;
+  byId("history-download").disabled = config.creators.length === 0;
+}
 function renderConfig() {
   byId("download-dir").value = config.download_dir;
   byId("move-to-dir").value = config.move_to_dir || "";
@@ -70,6 +89,7 @@ function renderConfig() {
   } else {
     config.creators.forEach((creator, index) => list.append(creatorElement(creator, index)));
   }
+  renderHistoryCreators();
 }
 async function saveConfig() {
   try {
@@ -91,7 +111,7 @@ async function pollStatus() {
     byId("status-headline").textContent = status.headline || "Ready";
     byId("status-detail").textContent = status.detail || "";
     const progress = byId("progress");
-    const runningStates = ["checking","downloading","downloaded","moving"];
+    const runningStates = ["starting","checking","downloading","downloaded","moving"];
     const finishedStates = ["complete","error","idle"];
     if (["complete","error"].includes(status.state)) progress.value = Number(status.percent ?? 100);
     else if (status.state === "idle") progress.value = 0;
@@ -99,6 +119,7 @@ async function pollStatus() {
     else progress.value = Number(status.percent);
     const wasRunning = runningStates.includes(lastStatusState);
     byId("scan").disabled = runningStates.includes(status.state);
+    byId("history-download").disabled = runningStates.includes(status.state) || !config?.creators?.length;
     renderErrors(status.errors);
     if (finishedStates.includes(status.state) && wasRunning) await loadConfig();
     lastStatusState = status.state;
@@ -123,8 +144,25 @@ byId("settings").addEventListener("submit", async (event) => {
 });
 byId("scan").addEventListener("click", async () => {
   byId("scan").disabled = true;
+  byId("history-download").disabled = true;
   try { await api("/api/scan", requestOptions({})); await pollStatus(); }
-  catch (error) { showMessage(error.message, true); byId("scan").disabled = false; }
+  catch (error) { showMessage(error.message, true); byId("scan").disabled = false; byId("history-download").disabled = false; }
+});
+byId("history").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  byId("scan").disabled = true;
+  byId("history-download").disabled = true;
+  const creatorUrl = byId("history-creator").value;
+  const years = Number(byId("history-years").value);
+  try {
+    await api("/api/history", requestOptions({creator_url:creatorUrl, years}));
+    showHistoryMessage(`Started ${years}-year history download.`, false);
+    await pollStatus();
+  } catch (error) {
+    showHistoryMessage(error.message, true);
+    byId("scan").disabled = false;
+    byId("history-download").disabled = false;
+  }
 });
 loadConfig().catch((error) => showMessage(error.message, true));
 loadVersion().catch(() => { byId("app-version").textContent = ""; });

@@ -1,4 +1,5 @@
 import importlib.util
+from datetime import date
 from pathlib import Path
 import tempfile
 import unittest
@@ -160,6 +161,42 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("%(channel)s/%(channel)s - ", output)
         self.assertIn("%(upload_date>%Y-%m-%d)s", output)
 
+    def test_history_scan_uses_calendar_cutoff_without_playlist_limit(self):
+        self.assertEqual(app.history_date_after(3, date(2026, 9, 8)), "20230908")
+        self.assertEqual(app.history_date_after(1, date(2024, 2, 29)), "20230228")
+        config = app.default_config()
+        config["date_after"] = "20230908"
+        config["max_per_creator"] = None
+        original = app.yt_dlp_executable
+        app.yt_dlp_executable = lambda: "/yt-dlp"
+        try:
+            command = app.scanner_command(config, {"url": "https://www.youtube.com/@durandian/videos"})
+        finally:
+            app.yt_dlp_executable = original
+        self.assertEqual(command[command.index("--dateafter") + 1], "20230908")
+        self.assertNotIn("--playlist-end", command)
+
+    def test_history_request_requires_saved_creator_and_valid_years(self):
+        config = app.default_config()
+        config["creators"] = [
+            {
+                "name": "Durandian",
+                "url": "https://www.youtube.com/@durandian/videos",
+                "enabled": False,
+            }
+        ]
+        creator, years = app.validate_history_request(
+            {"creator_url": "youtube.com/@durandian", "years": 3}, config
+        )
+        self.assertEqual(creator["name"], "Durandian")
+        self.assertEqual(years, 3)
+        with self.assertRaisesRegex(ValueError, "between 1 and 10"):
+            app.validate_history_request({"creator_url": creator["url"], "years": 11}, config)
+        with self.assertRaisesRegex(ValueError, "saved creator"):
+            app.validate_history_request(
+                {"creator_url": "youtube.com/@someoneelse", "years": 3}, config
+            )
+
     def test_records_and_exposes_creator_download_counts(self):
         with tempfile.TemporaryDirectory() as directory:
             original = app.STATS_FILE
@@ -209,6 +246,15 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('await api("/health")', script)
         self.assertIn('["complete","error"].includes(status.state)', script)
         self.assertIn("status.percent ?? 100", script)
+
+    def test_ui_has_expandable_history_download(self):
+        static = PROJECT / "src" / "creator_catcher" / "static"
+        markup = (static / "index.html").read_text(encoding="utf-8")
+        script = (static / "app.js").read_text(encoding="utf-8")
+        self.assertIn('class="card history-card"', markup)
+        self.assertIn('id="history-creator"', markup)
+        self.assertIn('id="history-years"', markup)
+        self.assertIn('api("/api/history"', script)
 
 if __name__ == "__main__":
     unittest.main()

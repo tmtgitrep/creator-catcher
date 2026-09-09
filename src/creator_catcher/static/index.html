@@ -37,6 +37,19 @@
       </form>
       <div id="creators" class="creator-list"></div>
     </section>
+    <details class="card history-card">
+      <summary><span class="section-title">Download creator history</span></summary>
+      <div class="history-content">
+        <p>Download every available video from one saved creator within a longer time range. Previously downloaded videos are skipped.</p>
+        <form id="history" class="history-grid">
+          <label>Creator<select id="history-creator" required></select></label>
+          <label>Years to look back<input id="history-years" type="number" min="1" max="10" value="3" required></label>
+          <button id="history-download" type="submit" class="primary">Download history</button>
+        </form>
+        <p class="field-help">Large histories may run for a long time and use substantial storage and network bandwidth.</p>
+        <p id="history-message" role="status"></p>
+      </div>
+    </details>
     <section class="card">
       <div class="section-title">Download settings</div>
       <form id="settings" class="settings-grid">

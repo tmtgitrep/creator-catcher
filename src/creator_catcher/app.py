@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import fcntl
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,7 +20,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 STATE_DIR = Path(os.environ.get("CREATOR_CATCHER_STATE_DIR", "/var/lib/creator-catcher"))
@@ -257,9 +258,20 @@ def yt_dlp_executable() -> str:
     raise RuntimeError("yt-dlp is not installed.")
 
 
+def history_date_after(years: int, today: date | None = None) -> str:
+    if not 1 <= years <= 10:
+        raise ValueError("History range must be between 1 and 10 years.")
+    today = today or date.today()
+    try:
+        cutoff = today.replace(year=today.year - years)
+    except ValueError:
+        cutoff = today.replace(year=today.year - years, day=28)
+    return cutoff.strftime("%Y%m%d")
+
+
 def scanner_command(config: dict, creator: dict) -> list[str]:
     height = config["max_height"]
-    return [
+    command = [
         yt_dlp_executable(),
         "--ignore-errors",
         "--no-overwrites",
@@ -267,9 +279,11 @@ def scanner_command(config: dict, creator: dict) -> list[str]:
         "--download-archive",
         str(ARCHIVE_FILE),
         "--dateafter",
-        f"now-{config['lookback_days']}days",
-        "--playlist-end",
-        str(config["max_per_creator"]),
+        config.get("date_after", f"now-{config['lookback_days']}days"),
+    ]
+    if config.get("max_per_creator") is not None:
+        command.extend(("--playlist-end", str(config["max_per_creator"])))
+    command.extend([
         "--match-filters",
         "!is_live",
         "--format",
@@ -296,7 +310,8 @@ def scanner_command(config: dict, creator: dict) -> list[str]:
         "--print",
         "after_move:CC_COMPLETE\t%(title)s",
         creator["url"],
-    ]
+    ])
+    return command
 
 
 def parse_progress_line(line: str, download_count: int) -> int:
@@ -455,7 +470,7 @@ def move_pending_videos(config: dict) -> tuple[int, list[str]]:
     return moved, errors
 
 
-def scan() -> int:
+def scan(creator_url: str | None = None, history_years: int | None = None) -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w", encoding="utf-8") as lock:
         try:
@@ -468,10 +483,33 @@ def scan() -> int:
         try:
             config = load_config()
             Path(config["download_dir"]).mkdir(parents=True, exist_ok=True)
-            enabled = [creator for creator in config["creators"] if creator["enabled"]]
+            history_mode = creator_url is not None or history_years is not None
+            if history_mode:
+                if creator_url is None or history_years is None:
+                    raise ValueError("History scans require a creator and year range.")
+                normalized_url = normalize_channel_url(creator_url)
+                selected = [creator for creator in config["creators"] if creator["url"] == normalized_url]
+                if not selected:
+                    raise ValueError("The history creator must be selected from the saved creator list.")
+                creators = selected
+                scan_config = {
+                    **config,
+                    "date_after": history_date_after(history_years),
+                    "max_per_creator": None,
+                }
+                scan_kind = "history"
+            else:
+                creators = [creator for creator in config["creators"] if creator["enabled"]]
+                scan_config = config
+                scan_kind = "regular"
             begin_scan_stats(config)
-            update_status(errors=[], download_count=0, moved_count=0)
-            if not enabled:
+            update_status(
+                errors=[],
+                download_count=0,
+                moved_count=0,
+                scan_kind=scan_kind,
+            )
+            if not creators:
                 update_status(
                     state="idle",
                     headline="No enabled creators",
@@ -484,19 +522,25 @@ def scan() -> int:
 
             failures = 0
             download_count = 0
-            for position, creator in enumerate(enabled, 1):
+            for position, creator in enumerate(creators, 1):
                 creator_start_count = download_count
+                if history_mode:
+                    headline = f"Checking history for {creator['name']}"
+                    detail = f"Looking back {history_years} year{'s' if history_years != 1 else ''}…"
+                else:
+                    headline = f"Checking {creator['name']}"
+                    detail = "Looking for eligible new uploads…"
                 update_status(
                     state="checking",
-                    headline=f"Checking {creator['name']}",
-                    detail="Looking for eligible new uploads…",
+                    headline=headline,
+                    detail=detail,
                     percent=None,
                     creator_position=position,
-                    creator_total=len(enabled),
+                    creator_total=len(creators),
                     download_count=download_count,
                 )
                 process = subprocess.Popen(
-                    scanner_command(config, creator),
+                    scanner_command(scan_config, creator),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -541,7 +585,7 @@ def scan() -> int:
                 error_detail = move_errors[0] if move_errors else f"{failures} creator checks failed."
                 update_status(
                     state="error",
-                    headline="Scan finished with errors",
+                    headline="History scan finished with errors" if history_mode else "Scan finished with errors",
                     detail=(
                         f"Downloaded {download_count} new {noun}; moved {moved_count} {moved_noun}. "
                         f"{problem_count} problem(s): {error_detail}"
@@ -554,7 +598,7 @@ def scan() -> int:
                 return 1
             update_status(
                 state="complete",
-                headline="Scan complete",
+                headline="History scan complete" if history_mode else "Scan complete",
                 detail=f"Downloaded {download_count} new {noun}; moved {moved_count} {moved_noun}.",
                 percent=100,
                 download_count=download_count,
@@ -574,6 +618,35 @@ def scan() -> int:
             )
             print(f"Creator Catcher: {exc}", file=sys.stderr)
             return 1
+
+
+def validate_history_request(body: object, config: dict | None = None) -> tuple[dict, int]:
+    if not isinstance(body, dict) or set(body) != {"creator_url", "years"}:
+        raise ValueError("History request must contain creator_url and years.")
+    if isinstance(body["years"], bool):
+        raise ValueError("History range must be a whole number of years.")
+    try:
+        years = int(body["years"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("History range must be a whole number of years.") from exc
+    history_date_after(years)
+    creator_url = normalize_channel_url(str(body["creator_url"]))
+    config = config or load_config()
+    creator = next((item for item in config["creators"] if item["url"] == creator_url), None)
+    if creator is None:
+        raise ValueError("Select a creator from the saved creator list.")
+    return creator, years
+
+
+def spawn_scan_process(arguments: list[str]) -> None:
+    process = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "scan", *arguments],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    threading.Thread(target=process.wait, daemon=True).start()
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -632,12 +705,27 @@ class RequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/scan":
                 if body != {}:
                     raise ValueError("Scan request must be an empty object.")
-                subprocess.Popen(
-                    [sys.executable, str(Path(__file__).resolve()), "scan"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
+                update_status(
+                    state="starting",
+                    headline="Starting scan…",
+                    detail="Preparing to check enabled creators.",
+                    percent=None,
+                    errors=[],
+                )
+                spawn_scan_process([])
+                self.send_json({"started": True}, HTTPStatus.ACCEPTED)
+            elif path == "/api/history":
+                creator, years = validate_history_request(body)
+                update_status(
+                    state="starting",
+                    headline=f"Starting history scan for {creator['name']}…",
+                    detail=f"Preparing to look back {years} year{'s' if years != 1 else ''}.",
+                    percent=None,
+                    errors=[],
+                    scan_kind="history",
+                )
+                spawn_scan_process(
+                    ["--creator-url", creator["url"], "--history-years", str(years)]
                 )
                 self.send_json({"started": True}, HTTPStatus.ACCEPTED)
             else:
@@ -681,14 +769,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("command", choices=("serve", "scan", "validate"), nargs="?", default="serve")
-    return parser.parse_args()
+    parser.add_argument("--creator-url")
+    parser.add_argument("--history-years", type=int)
+    args = parser.parse_args()
+    if args.command != "scan" and (args.creator_url is not None or args.history_years is not None):
+        parser.error("History options can only be used with the scan command.")
+    if (args.creator_url is None) != (args.history_years is None):
+        parser.error("--creator-url and --history-years must be used together.")
+    return args
 
 
 def main() -> int:
-    command = parse_args().command
-    if command == "scan":
-        return scan()
-    if command == "validate":
+    args = parse_args()
+    if args.command == "scan":
+        return scan(args.creator_url, args.history_years)
+    if args.command == "validate":
         return validate_installation()
     return serve()
 
