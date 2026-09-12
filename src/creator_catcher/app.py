@@ -20,7 +20,7 @@ import time
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 STATE_DIR = Path(os.environ.get("CREATOR_CATCHER_STATE_DIR", "/var/lib/creator-catcher"))
@@ -30,10 +30,13 @@ STATS_FILE = STATE_DIR / "stats.json"
 ARCHIVE_FILE = STATE_DIR / "download-archive.txt"
 LOCK_FILE = STATE_DIR / "scan.lock"
 SCHEDULE_FILE = STATE_DIR / "schedule.json"
+VIDEO_LOG_FILE = STATE_DIR / "video-log.json"
 CONFIG_LOCK = threading.RLock()
 STATS_LOCK = threading.RLock()
+VIDEO_LOG_LOCK = threading.RLock()
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 MAX_ERRORS = 100
+MAX_VIDEO_LOG_ENTRIES = 500
 
 
 def default_config() -> dict:
@@ -236,6 +239,120 @@ def record_creator_downloads(url: str, count: int) -> None:
         save_stats(stats)
 
 
+def load_video_log() -> list[dict]:
+    with VIDEO_LOG_LOCK:
+        if not VIDEO_LOG_FILE.exists():
+            return []
+        try:
+            loaded = json.loads(VIDEO_LOG_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        entries = loaded.get("entries", []) if isinstance(loaded, dict) else []
+        return [entry for entry in entries if isinstance(entry, dict)][
+            :MAX_VIDEO_LOG_ENTRIES
+        ]
+
+
+def save_video_log(entries: list[dict]) -> None:
+    atomic_json_write(VIDEO_LOG_FILE, {"entries": entries[:MAX_VIDEO_LOG_ENTRIES]})
+
+
+def update_video_log(video_id: str, **fields: object) -> dict:
+    """Update one video record without allowing log I/O to stop a scan."""
+    with VIDEO_LOG_LOCK:
+        entries = load_video_log()
+        entry = next((item for item in entries if item.get("video_id") == video_id), None)
+        if entry is None:
+            entry = {
+                "video_id": video_id,
+                "creator": "Unknown creator",
+                "title": video_id,
+                "download_status": "pending",
+                "transfer_status": "pending",
+            }
+            entries.insert(0, entry)
+        else:
+            entries.remove(entry)
+            entries.insert(0, entry)
+        entry.update(fields)
+        try:
+            save_video_log(entries)
+        except OSError as exc:
+            print(f"Creator Catcher: cannot update video log: {exc}", file=sys.stderr)
+        return entry
+
+
+def record_video_attempt(video_id: str, creator: str, title: str) -> None:
+    update_video_log(
+        video_id,
+        creator=creator or "Unknown creator",
+        title=title or video_id,
+        attempted_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        download_status="pending",
+        download_error="",
+        transfer_status="pending",
+        transfer_error="",
+    )
+
+
+def record_video_download(video_id: str, filepath: str, move_enabled: bool) -> str:
+    entry = update_video_log(
+        video_id,
+        source_path=filepath,
+        downloaded_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        download_status="success",
+        download_error="",
+        transfer_status="pending" if move_enabled else "not_requested",
+        transfer_error="",
+    )
+    return str(entry.get("title", video_id))
+
+
+def video_id_from_path(path: Path) -> str:
+    match = re.search(r"\[([A-Za-z0-9_-]{11})\](?=\.[^.]+$)", path.name)
+    return match.group(1) if match else ""
+
+
+def record_video_transfer(source: Path, success: bool, error: str = "") -> None:
+    video_id = video_id_from_path(source)
+    if not video_id:
+        return
+    fields: dict[str, object] = {
+        "transfer_status": "success" if success else "failed",
+        "transfer_error": "" if success else error[:2000],
+    }
+    if success:
+        fields["transferred_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    if not any(entry.get("video_id") == video_id for entry in load_video_log()):
+        try:
+            downloaded_at = datetime.fromtimestamp(source.stat().st_mtime).astimezone()
+        except OSError:
+            downloaded_at = datetime.now().astimezone()
+        fields.update(
+            creator=source.parent.name or "Unknown creator",
+            title=source.stem,
+            source_path=str(source),
+            downloaded_at=downloaded_at.isoformat(timespec="seconds"),
+            download_status="success",
+            download_error="",
+        )
+    update_video_log(video_id, **fields)
+
+
+def mark_video_download_failures(video_ids: set[str], error: str) -> None:
+    for video_id in video_ids:
+        entry = next(
+            (item for item in load_video_log() if item.get("video_id") == video_id), None
+        )
+        if entry and entry.get("download_status") == "pending":
+            update_video_log(
+                video_id,
+                download_status="failed",
+                download_error=(error or "Download did not complete.")[:2000],
+                transfer_status="not_requested",
+            )
+
+
 def config_for_api(config: dict | None = None) -> dict:
     config = config or load_config()
     stats = load_stats()["creators"]
@@ -350,25 +467,39 @@ def scanner_command(config: dict, creator: dict, single_video: bool = False) -> 
         "--progress-template",
         "download:CC_PROGRESS\t%(progress._percent_str)s\t%(progress._downloaded_bytes_str)s\t%(progress._total_bytes_str)s\t%(progress._speed_str)s\t%(progress._eta_str)s\t%(info.title)s",
         "--print",
-        "before_dl:CC_DOWNLOAD\t%(title)s",
+        "before_dl:CC_DOWNLOAD\t%(id)s\t%(channel)s\t%(title)s",
         "--print",
-        "after_move:CC_COMPLETE\t%(title)s",
+        "after_move:CC_COMPLETE\t%(id)s\t%(filepath)s",
         creator["url"],
     ])
     return command
 
 
-def parse_progress_line(line: str, download_count: int) -> int:
-    fields = line.rstrip("\n").split("\t", 6)
-    if fields[0] == "CC_DOWNLOAD" and len(fields) >= 2:
+def parse_progress_line(
+    line: str,
+    download_count: int,
+    attempted_video_ids: set[str] | None = None,
+    move_enabled: bool = False,
+) -> int:
+    attempted_video_ids = attempted_video_ids if attempted_video_ids is not None else set()
+    if line.startswith("CC_DOWNLOAD\t"):
+        fields = line.rstrip("\n").split("\t", 3)
+        if len(fields) < 4:
+            return download_count
+        video_id, creator, title = fields[1:4]
+        attempted_video_ids.add(video_id)
+        record_video_attempt(video_id, creator, title)
         update_status(
             state="downloading",
-            headline=f"Downloading {fields[1]}",
+            headline=f"Downloading {title}",
             detail="Preparing download…",
             percent=0,
             download_count=download_count,
         )
-    elif fields[0] == "CC_PROGRESS" and len(fields) >= 7:
+    elif line.startswith("CC_PROGRESS\t"):
+        fields = line.rstrip("\n").split("\t", 6)
+        if len(fields) < 7:
+            return download_count
         try:
             percent = max(0.0, min(100.0, float(fields[1].strip().rstrip("%"))))
         except ValueError:
@@ -388,12 +519,16 @@ def parse_progress_line(line: str, download_count: int) -> int:
             percent=percent,
             download_count=download_count,
         )
-    elif fields[0] == "CC_COMPLETE" and len(fields) >= 2:
+    elif line.startswith("CC_COMPLETE\t"):
+        fields = line.rstrip("\n").split("\t", 2)
+        if len(fields) < 3:
+            return download_count
+        title = record_video_download(fields[1], fields[2], move_enabled)
         download_count += 1
         noun = "video" if download_count == 1 else "videos"
         update_status(
             state="downloaded",
-            headline=f"Saved {fields[1]}",
+            headline=f"Saved {title}",
             detail=f"{download_count} {noun} downloaded in this scan.",
             percent=100,
             download_count=download_count,
@@ -445,14 +580,17 @@ def move_pending_videos(config: dict) -> tuple[int, list[str]]:
         return 0, []
 
     source_root = Path(config["download_dir"])
-    destination_root = Path(destination_value)
-    if not destination_root.is_dir():
-        return 0, [f"move destination is unavailable: {destination_root}"]
     videos = sorted(
         path
         for path in source_root.rglob("*")
         if path.is_file() and not path.is_symlink() and path.suffix.lower() in VIDEO_EXTENSIONS
     )
+    destination_root = Path(destination_value)
+    if not destination_root.is_dir():
+        error = f"move destination is unavailable: {destination_root}"
+        for source in videos:
+            record_video_transfer(source, False, error)
+        return 0, [error]
     moved = 0
     errors: list[str] = []
     for position, source in enumerate(videos, 1):
@@ -498,11 +636,13 @@ def move_pending_videos(config: dict) -> tuple[int, list[str]]:
             os.replace(temporary, target)
             source.unlink()
             moved += 1
+            record_video_transfer(source, True)
         except OSError as exc:
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+            record_video_transfer(source, False, str(exc))
             errors.append(f"{source_relative}: {exc}")
 
     for directory in sorted(source_root.rglob("*"), key=lambda path: len(path.parts), reverse=True):
@@ -664,14 +804,24 @@ def scan(
                 assert process.stdout is not None
                 recent_warning = ""
                 creator_errors = []
+                attempted_video_ids: set[str] = set()
                 for line in process.stdout:
                     print(line, end="", flush=True)
-                    download_count = parse_progress_line(line, download_count)
+                    download_count = parse_progress_line(
+                        line,
+                        download_count,
+                        attempted_video_ids,
+                        move_enabled=bool(config.get("move_to_dir")),
+                    )
                     if line.startswith("ERROR:"):
                         creator_errors.append(line.strip())
                     if line.startswith(("ERROR:", "WARNING:")):
                         recent_warning = line.strip()
                 return_code = process.wait()
+                mark_video_download_failures(
+                    attempted_video_ids,
+                    creator_errors[-1] if creator_errors else recent_warning,
+                )
                 creator_downloads = download_count - creator_start_count
                 if not video_mode:
                     record_creator_downloads(creator["url"], creator_downloads)
@@ -820,6 +970,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json(config_for_api())
         elif path == "/api/status":
             self.send_json(status_snapshot())
+        elif path == "/api/video-log":
+            self.send_json({"entries": load_video_log()})
         elif path == "/health":
             self.send_json({"ok": True, "version": VERSION})
         else:

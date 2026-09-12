@@ -110,20 +110,62 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_download_progress_updates_status(self):
         with tempfile.TemporaryDirectory() as directory:
-            original = app.STATUS_FILE
+            original = app.STATUS_FILE, app.VIDEO_LOG_FILE
             app.STATUS_FILE = Path(directory) / "status.json"
+            app.VIDEO_LOG_FILE = Path(directory) / "video-log.json"
             try:
+                attempted = set()
+                count = app.parse_progress_line(
+                    "CC_DOWNLOAD\tdQw4w9WgXcQ\tTest Creator\tTest video\n",
+                    0,
+                    attempted,
+                    move_enabled=True,
+                )
                 count = app.parse_progress_line(
                     "CC_PROGRESS\t42.5%\t425 MiB\t1 GiB\t10 MiB/s\t00:58\tTest video\n",
-                    0,
+                    count,
+                    attempted,
+                    move_enabled=True,
                 )
                 self.assertEqual(count, 0)
                 self.assertEqual(app.status_snapshot()["percent"], 42.5)
-                count = app.parse_progress_line("CC_COMPLETE\tTest video\n", count)
+                count = app.parse_progress_line(
+                    f"CC_COMPLETE\tdQw4w9WgXcQ\t{directory}/Test Creator/Test video [dQw4w9WgXcQ].mp4\n",
+                    count,
+                    attempted,
+                    move_enabled=True,
+                )
                 self.assertEqual(count, 1)
                 self.assertEqual(app.status_snapshot()["state"], "downloaded")
+                self.assertEqual(attempted, {"dQw4w9WgXcQ"})
+                self.assertEqual(app.load_video_log()[0]["download_status"], "success")
+                self.assertEqual(app.load_video_log()[0]["transfer_status"], "pending")
             finally:
-                app.STATUS_FILE = original
+                app.STATUS_FILE, app.VIDEO_LOG_FILE = original
+
+    def test_video_log_tracks_failed_download_and_successful_transfer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = app.VIDEO_LOG_FILE
+            app.VIDEO_LOG_FILE = root / "video-log.json"
+            try:
+                app.record_video_attempt("fail1234567", "Creator", "Failed video")
+                app.mark_video_download_failures({"fail1234567"}, "network error")
+                failed = app.load_video_log()[0]
+                self.assertEqual(failed["download_status"], "failed")
+                self.assertEqual(failed["transfer_status"], "not_requested")
+
+                source = root / "Creator" / "Creator - Video [good1234567].mp4"
+                source.parent.mkdir()
+                source.write_bytes(b"video")
+                app.record_video_attempt("good1234567", "Creator", "Good video")
+                app.record_video_download("good1234567", str(source), True)
+                app.record_video_transfer(source, True)
+                successful = app.load_video_log()[0]
+                self.assertEqual(successful["download_status"], "success")
+                self.assertEqual(successful["transfer_status"], "success")
+            finally:
+                app.VIDEO_LOG_FILE = original
 
     def test_moves_pending_video_and_preserves_creator_folder(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -359,6 +401,16 @@ class PackagingTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('class="card creators-card collapsible-card"', markup)
         self.assertIn('<summary><span class="section-title">Creators</span></summary>', markup)
+
+    def test_ui_has_collapsible_video_log_with_two_statuses(self):
+        static = PROJECT / "src" / "creator_catcher" / "static"
+        markup = (static / "index.html").read_text(encoding="utf-8")
+        script = (static / "app.js").read_text(encoding="utf-8")
+        self.assertIn('class="card log-card collapsible-card"', markup)
+        self.assertIn('id="video-log"', markup)
+        self.assertIn('api("/api/video-log")', script)
+        self.assertIn('"✓ Downloaded"', script)
+        self.assertIn('"✓ Transferred"', script)
 
     def test_timer_checks_app_managed_schedule(self):
         timer = (PROJECT / "packaging/systemd/creator-catcher-scan.timer").read_text(

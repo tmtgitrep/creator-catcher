@@ -66,6 +66,56 @@ function renderErrors(errors) {
   });
   if (!entries.length) details.open = false;
 }
+function logBadge(status, kind, error) {
+  const badge = document.createElement("span");
+  const labels = kind === "download"
+    ? {success:"✓ Downloaded", failed:"✕ Download failed", pending:"… Downloading"}
+    : {success:"✓ Transferred", failed:"✕ Transfer failed", pending:"… Transfer pending", not_requested:"— Transfer not configured"};
+  badge.className = `log-badge ${status || "pending"}`;
+  badge.textContent = labels[status] || labels.pending;
+  if (error) badge.title = error;
+  return badge;
+}
+function renderVideoLog(entries) {
+  const list = byId("video-log");
+  const items = Array.isArray(entries) ? entries : [];
+  byId("video-log-count").textContent = items.length ? String(items.length) : "";
+  list.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty"; empty.textContent = "No video activity logged yet."; list.append(empty);
+    return;
+  }
+  items.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "log-row";
+    const info = document.createElement("div");
+    info.className = "log-info";
+    const title = document.createElement("a");
+    title.className = "log-title";
+    title.textContent = entry.title || entry.video_id || "Unknown video";
+    title.href = `https://www.youtube.com/watch?v=${encodeURIComponent(entry.video_id || "")}`;
+    title.target = "_blank";
+    title.rel = "noopener noreferrer";
+    const meta = document.createElement("span");
+    const timestamp = entry.attempted_at || entry.downloaded_at;
+    const displayedTime = timestamp ? new Date(timestamp).toLocaleString() : "Unknown time";
+    meta.textContent = `${entry.creator || "Unknown creator"} · ${displayedTime}`;
+    info.append(title, meta);
+    const states = document.createElement("div");
+    states.className = "log-states";
+    states.append(
+      logBadge(entry.download_status, "download", entry.download_error),
+      logBadge(entry.transfer_status, "transfer", entry.transfer_error),
+    );
+    row.append(info, states);
+    list.append(row);
+  });
+}
+async function loadVideoLog() {
+  const result = await api("/api/video-log");
+  renderVideoLog(result.entries);
+}
 function renderHistoryCreators() {
   const select = byId("history-creator");
   const previous = select.value;
@@ -136,7 +186,11 @@ async function pollStatus() {
     byId("history-download").disabled = runningStates.includes(status.state) || !config?.creators?.length;
     byId("video-download").disabled = runningStates.includes(status.state);
     renderErrors(status.errors);
-    if (finishedStates.includes(status.state) && wasRunning) await loadConfig();
+    if (status.state !== lastStatusState) loadVideoLog().catch(() => {});
+    if (finishedStates.includes(status.state) && wasRunning) {
+      await loadConfig();
+      await loadVideoLog();
+    }
     lastStatusState = status.state;
   } catch (error) {
     byId("status-headline").textContent = "Connection lost";
@@ -206,5 +260,6 @@ byId("history").addEventListener("submit", async (event) => {
 });
 loadConfig().catch((error) => showMessage(error.message, true));
 loadVersion().catch(() => { byId("app-version").textContent = ""; });
+loadVideoLog().catch(() => {});
 pollStatus();
 setInterval(pollStatus, 1000);
