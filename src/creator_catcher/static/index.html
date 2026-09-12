@@ -26,17 +26,30 @@
         <ul id="error-list"></ul>
       </details>
     </section>
-    <section class="card">
-      <div class="section-heading">
-        <div><div class="section-title">Creators</div><p>Add a channel URL ending in /videos, /shorts, or /streams.</p></div>
-      </div>
+    <details class="card creators-card collapsible-card" open>
+      <summary><span class="section-title">Creators</span></summary>
+      <div class="creators-content">
+      <p>Add a channel URL ending in /videos, /shorts, or /streams.</p>
       <form id="add-creator" class="add-grid">
         <label>Name<input id="new-name" maxlength="120" required placeholder="Creator name"></label>
         <label>YouTube URL<input id="new-url" required placeholder="https://youtube.com/@creator"></label>
         <button type="submit">Add creator</button>
       </form>
       <div id="creators" class="creator-list"></div>
-    </section>
+      </div>
+    </details>
+    <details class="card video-card collapsible-card">
+      <summary><span class="section-title">Download a video</span></summary>
+      <div class="video-content">
+        <p>Paste a YouTube video link to download it once using the same naming, metadata, and network destination settings.</p>
+        <form id="video" class="video-grid">
+          <label>YouTube video link<input id="video-url" type="url" required placeholder="https://www.youtube.com/watch?v=..."></label>
+          <button id="video-download" type="submit" class="primary">Download video</button>
+        </form>
+        <p class="field-help">Playlist parameters are ignored. A video already present in the download archive will be skipped.</p>
+        <p id="video-message" role="status"></p>
+      </div>
+    </details>
     <details class="card history-card collapsible-card">
       <summary><span class="section-title">Download creator history</span></summary>
       <div class="history-content">

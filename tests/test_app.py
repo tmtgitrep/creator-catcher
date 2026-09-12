@@ -22,6 +22,22 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.normalize_channel_url("https://example.com/channel")
 
+    def test_normalizes_single_video_urls_and_drops_playlist_parameters(self):
+        expected = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        self.assertEqual(
+            app.normalize_video_url(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123&index=2"
+            ),
+            expected,
+        )
+        self.assertEqual(app.normalize_video_url("https://youtu.be/dQw4w9WgXcQ?t=30"), expected)
+        self.assertEqual(app.normalize_video_url("https://youtube.com/shorts/dQw4w9WgXcQ"), expected)
+
+    def test_rejects_non_video_youtube_urls(self):
+        for value in ("https://youtube.com/@creator", "https://example.com/watch?v=dQw4w9WgXcQ"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "valid YouTube"):
+                app.normalize_video_url(value)
+
     def test_validates_complete_config(self):
         candidate = app.default_config()
         candidate["creators"] = [{"name": "Durandian", "url": "https://youtube.com/@durandian", "enabled": True}]
@@ -197,6 +213,32 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("%(channel)s/%(channel)s - ", output)
         self.assertIn("%(upload_date>%Y-%m-%d)s", output)
 
+    def test_single_video_command_ignores_age_limits_and_playlists(self):
+        config = app.default_config()
+        config.update(date_after="", max_per_creator=None)
+        original = app.yt_dlp_executable
+        app.yt_dlp_executable = lambda: "/yt-dlp"
+        try:
+            command = app.scanner_command(
+                config,
+                {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                single_video=True,
+            )
+        finally:
+            app.yt_dlp_executable = original
+        self.assertIn("--no-playlist", command)
+        self.assertNotIn("--dateafter", command)
+        self.assertNotIn("--playlist-end", command)
+        self.assertEqual(command[-1], "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    def test_video_request_accepts_only_one_video_url(self):
+        self.assertEqual(
+            app.validate_video_request({"video_url": "https://youtu.be/dQw4w9WgXcQ"}),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        )
+        with self.assertRaisesRegex(ValueError, "must contain video_url"):
+            app.validate_video_request({"video_url": "https://youtu.be/dQw4w9WgXcQ", "extra": 1})
+
     def test_history_scan_uses_calendar_cutoff_without_playlist_limit(self):
         self.assertEqual(app.history_date_after(3, date(2026, 9, 8)), "20230908")
         self.assertEqual(app.history_date_after(1, date(2024, 2, 29)), "20230228")
@@ -301,6 +343,22 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('id="automatic-interval"', markup)
         self.assertIn('id="automatic-time"', markup)
         self.assertIn("config.automatic_scan_interval_days", script)
+
+    def test_ui_has_expandable_single_video_download(self):
+        static = PROJECT / "src" / "creator_catcher" / "static"
+        markup = (static / "index.html").read_text(encoding="utf-8")
+        script = (static / "app.js").read_text(encoding="utf-8")
+        self.assertIn('class="card video-card collapsible-card"', markup)
+        self.assertIn('id="video-url"', markup)
+        self.assertIn('id="video-download"', markup)
+        self.assertIn('api("/api/video"', script)
+
+    def test_ui_has_collapsible_creators(self):
+        markup = (
+            PROJECT / "src" / "creator_catcher" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn('class="card creators-card collapsible-card"', markup)
+        self.assertIn('<summary><span class="section-title">Creators</span></summary>', markup)
 
     def test_timer_checks_app_managed_schedule(self):
         timer = (PROJECT / "packaging/systemd/creator-catcher-scan.timer").read_text(

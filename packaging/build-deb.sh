@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${1:-0.5.0}
+VERSION=${1:-0.6.0}
 OUTPUT_DIR="$PROJECT_DIR/dist"
 WORK_DIR=$(mktemp -d)
 STAGE="$WORK_DIR/root"

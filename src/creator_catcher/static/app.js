@@ -22,6 +22,11 @@ function showHistoryMessage(text, error) {
   message.textContent = text;
   message.classList.toggle("error", Boolean(error));
 }
+function showVideoMessage(text, error) {
+  const message = byId("video-message");
+  message.textContent = text;
+  message.classList.toggle("error", Boolean(error));
+}
 function creatorElement(creator, index) {
   const row = document.createElement("div");
   row.className = "creator";
@@ -129,6 +134,7 @@ async function pollStatus() {
     const wasRunning = runningStates.includes(lastStatusState);
     byId("scan").disabled = runningStates.includes(status.state);
     byId("history-download").disabled = runningStates.includes(status.state) || !config?.creators?.length;
+    byId("video-download").disabled = runningStates.includes(status.state);
     renderErrors(status.errors);
     if (finishedStates.includes(status.state) && wasRunning) await loadConfig();
     lastStatusState = status.state;
@@ -158,13 +164,33 @@ byId("automatic-enabled").addEventListener("change", renderAutomaticScheduleStat
 byId("scan").addEventListener("click", async () => {
   byId("scan").disabled = true;
   byId("history-download").disabled = true;
+  byId("video-download").disabled = true;
   try { await api("/api/scan", requestOptions({})); await pollStatus(); }
-  catch (error) { showMessage(error.message, true); byId("scan").disabled = false; byId("history-download").disabled = false; }
+  catch (error) { showMessage(error.message, true); byId("scan").disabled = false; byId("history-download").disabled = false; byId("video-download").disabled = false; }
+});
+byId("video").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  byId("scan").disabled = true;
+  byId("history-download").disabled = true;
+  byId("video-download").disabled = true;
+  const videoUrl = byId("video-url").value;
+  try {
+    await api("/api/video", requestOptions({video_url:videoUrl}));
+    showVideoMessage("Video download started.", false);
+    event.target.reset();
+    await pollStatus();
+  } catch (error) {
+    showVideoMessage(error.message, true);
+    byId("scan").disabled = false;
+    byId("history-download").disabled = !config?.creators?.length;
+    byId("video-download").disabled = false;
+  }
 });
 byId("history").addEventListener("submit", async (event) => {
   event.preventDefault();
   byId("scan").disabled = true;
   byId("history-download").disabled = true;
+  byId("video-download").disabled = true;
   const creatorUrl = byId("history-creator").value;
   const years = Number(byId("history-years").value);
   try {
@@ -174,7 +200,8 @@ byId("history").addEventListener("submit", async (event) => {
   } catch (error) {
     showHistoryMessage(error.message, true);
     byId("scan").disabled = false;
-    byId("history-download").disabled = false;
+    byId("history-download").disabled = !config?.creators?.length;
+    byId("video-download").disabled = false;
   }
 });
 loadConfig().catch((error) => showMessage(error.message, true));

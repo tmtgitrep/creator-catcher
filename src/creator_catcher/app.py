@@ -17,10 +17,10 @@ import subprocess
 import sys
 import threading
 import time
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 STATE_DIR = Path(os.environ.get("CREATOR_CATCHER_STATE_DIR", "/var/lib/creator-catcher"))
@@ -88,6 +88,33 @@ def normalize_channel_url(value: str) -> str:
     if not path.endswith(("/videos", "/shorts", "/streams")):
         path += "/videos"
     return urlunsplit(("https", "www.youtube.com", path, "", ""))
+
+
+def normalize_video_url(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("Paste a YouTube video link.")
+    if "://" not in value:
+        value = "https://" + value
+    parsed = urlsplit(value)
+    host = parsed.netloc.lower().split(":", 1)[0]
+    video_id = ""
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if host in {"youtu.be", "www.youtu.be"} and path_parts:
+        video_id = path_parts[0]
+    elif host in {
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+    }:
+        if parsed.path.rstrip("/") == "/watch":
+            video_id = parse_qs(parsed.query).get("v", [""])[0]
+        elif len(path_parts) == 2 and path_parts[0] in {"embed", "live", "shorts"}:
+            video_id = path_parts[1]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise ValueError("Enter a valid YouTube watch, short, live, or youtu.be video link.")
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def validate_config(candidate: dict) -> dict:
@@ -283,7 +310,7 @@ def history_date_after(years: int, today: date | None = None) -> str:
     return cutoff.strftime("%Y%m%d")
 
 
-def scanner_command(config: dict, creator: dict) -> list[str]:
+def scanner_command(config: dict, creator: dict, single_video: bool = False) -> list[str]:
     height = config["max_height"]
     command = [
         yt_dlp_executable(),
@@ -292,11 +319,14 @@ def scanner_command(config: dict, creator: dict) -> list[str]:
         "--no-color",
         "--download-archive",
         str(ARCHIVE_FILE),
-        "--dateafter",
-        config.get("date_after", f"now-{config['lookback_days']}days"),
     ]
+    date_after = config.get("date_after", f"now-{config['lookback_days']}days")
+    if date_after:
+        command.extend(("--dateafter", date_after))
     if config.get("max_per_creator") is not None:
         command.extend(("--playlist-end", str(config["max_per_creator"])))
+    if single_video:
+        command.append("--no-playlist")
     command.extend([
         "--match-filters",
         "!is_live",
@@ -539,7 +569,11 @@ def scheduled_scan() -> int:
     return scan()
 
 
-def scan(creator_url: str | None = None, history_years: int | None = None) -> int:
+def scan(
+    creator_url: str | None = None,
+    history_years: int | None = None,
+    video_url: str | None = None,
+) -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w", encoding="utf-8") as lock:
         try:
@@ -553,7 +587,15 @@ def scan(creator_url: str | None = None, history_years: int | None = None) -> in
             config = load_config()
             Path(config["download_dir"]).mkdir(parents=True, exist_ok=True)
             history_mode = creator_url is not None or history_years is not None
-            if history_mode:
+            video_mode = video_url is not None
+            if history_mode and video_mode:
+                raise ValueError("Choose either a creator history or one video link.")
+            if video_mode:
+                normalized_video_url = normalize_video_url(video_url)
+                creators = [{"name": "Video link", "url": normalized_video_url}]
+                scan_config = {**config, "date_after": "", "max_per_creator": None}
+                scan_kind = "video"
+            elif history_mode:
                 if creator_url is None or history_years is None:
                     raise ValueError("History scans require a creator and year range.")
                 normalized_url = normalize_channel_url(creator_url)
@@ -571,7 +613,8 @@ def scan(creator_url: str | None = None, history_years: int | None = None) -> in
                 creators = [creator for creator in config["creators"] if creator["enabled"]]
                 scan_config = config
                 scan_kind = "regular"
-            begin_scan_stats(config)
+            if not video_mode:
+                begin_scan_stats(config)
             update_status(
                 errors=[],
                 download_count=0,
@@ -593,7 +636,10 @@ def scan(creator_url: str | None = None, history_years: int | None = None) -> in
             download_count = 0
             for position, creator in enumerate(creators, 1):
                 creator_start_count = download_count
-                if history_mode:
+                if video_mode:
+                    headline = "Checking video link"
+                    detail = "Looking for the requested video…"
+                elif history_mode:
                     headline = f"Checking history for {creator['name']}"
                     detail = f"Looking back {history_years} year{'s' if history_years != 1 else ''}…"
                 else:
@@ -609,7 +655,7 @@ def scan(creator_url: str | None = None, history_years: int | None = None) -> in
                     download_count=download_count,
                 )
                 process = subprocess.Popen(
-                    scanner_command(scan_config, creator),
+                    scanner_command(scan_config, creator, single_video=video_mode),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -627,7 +673,8 @@ def scan(creator_url: str | None = None, history_years: int | None = None) -> in
                         recent_warning = line.strip()
                 return_code = process.wait()
                 creator_downloads = download_count - creator_start_count
-                record_creator_downloads(creator["url"], creator_downloads)
+                if not video_mode:
+                    record_creator_downloads(creator["url"], creator_downloads)
                 if return_code != 0 or creator_errors:
                     failures += 1
                     messages = creator_errors or [recent_warning or "yt-dlp returned an error."]
@@ -654,7 +701,13 @@ def scan(creator_url: str | None = None, history_years: int | None = None) -> in
                 error_detail = move_errors[0] if move_errors else f"{failures} creator checks failed."
                 update_status(
                     state="error",
-                    headline="History scan finished with errors" if history_mode else "Scan finished with errors",
+                    headline=(
+                        "Video download finished with errors"
+                        if video_mode
+                        else "History scan finished with errors"
+                        if history_mode
+                        else "Scan finished with errors"
+                    ),
                     detail=(
                         f"Downloaded {download_count} new {noun}; moved {moved_count} {moved_noun}. "
                         f"{problem_count} problem(s): {error_detail}"
@@ -665,10 +718,22 @@ def scan(creator_url: str | None = None, history_years: int | None = None) -> in
                     errors=scan_errors,
                 )
                 return 1
+            if video_mode and download_count == 0:
+                completion_detail = "No new video was downloaded; it may already be in the archive."
+            else:
+                completion_detail = (
+                    f"Downloaded {download_count} new {noun}; moved {moved_count} {moved_noun}."
+                )
             update_status(
                 state="complete",
-                headline="History scan complete" if history_mode else "Scan complete",
-                detail=f"Downloaded {download_count} new {noun}; moved {moved_count} {moved_noun}.",
+                headline=(
+                    "Video download complete"
+                    if video_mode
+                    else "History scan complete"
+                    if history_mode
+                    else "Scan complete"
+                ),
+                detail=completion_detail,
                 percent=100,
                 download_count=download_count,
                 moved_count=moved_count,
@@ -705,6 +770,12 @@ def validate_history_request(body: object, config: dict | None = None) -> tuple[
     if creator is None:
         raise ValueError("Select a creator from the saved creator list.")
     return creator, years
+
+
+def validate_video_request(body: object) -> str:
+    if not isinstance(body, dict) or set(body) != {"video_url"}:
+        raise ValueError("Video request must contain video_url.")
+    return normalize_video_url(str(body["video_url"]))
 
 
 def spawn_scan_process(arguments: list[str]) -> None:
@@ -797,6 +868,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                     ["--creator-url", creator["url"], "--history-years", str(years)]
                 )
                 self.send_json({"started": True}, HTTPStatus.ACCEPTED)
+            elif path == "/api/video":
+                video_url = validate_video_request(body)
+                update_status(
+                    state="starting",
+                    headline="Starting video download…",
+                    detail="Checking the download archive and preparing the video.",
+                    percent=None,
+                    errors=[],
+                    scan_kind="video",
+                )
+                spawn_scan_process(["--video-url", video_url])
+                self.send_json({"started": True}, HTTPStatus.ACCEPTED)
             else:
                 self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except PermissionError as exc:
@@ -845,18 +928,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--creator-url")
     parser.add_argument("--history-years", type=int)
+    parser.add_argument("--video-url")
     args = parser.parse_args()
-    if args.command != "scan" and (args.creator_url is not None or args.history_years is not None):
-        parser.error("History options can only be used with the scan command.")
+    scan_options_used = any(
+        value is not None for value in (args.creator_url, args.history_years, args.video_url)
+    )
+    if args.command != "scan" and scan_options_used:
+        parser.error("History and video options can only be used with the scan command.")
     if (args.creator_url is None) != (args.history_years is None):
         parser.error("--creator-url and --history-years must be used together.")
+    if args.video_url is not None and args.creator_url is not None:
+        parser.error("--video-url cannot be combined with creator history options.")
     return args
 
 
 def main() -> int:
     args = parse_args()
     if args.command == "scan":
-        return scan(args.creator_url, args.history_years)
+        return scan(args.creator_url, args.history_years, args.video_url)
     if args.command == "scheduled-scan":
         return scheduled_scan()
     if args.command == "validate":
