@@ -81,6 +81,10 @@ function renderConfig() {
   byId("lookback").value = String(config.lookback_days);
   byId("maximum").value = String(config.max_per_creator);
   byId("height").value = String(config.max_height);
+  byId("automatic-enabled").checked = Boolean(config.automatic_scans_enabled);
+  byId("automatic-interval").value = String(config.automatic_scan_interval_days);
+  byId("automatic-time").value = config.automatic_scan_time;
+  renderAutomaticScheduleState();
   const list = byId("creators");
   list.replaceChildren();
   if (!config.creators.length) {
@@ -90,6 +94,11 @@ function renderConfig() {
     config.creators.forEach((creator, index) => list.append(creatorElement(creator, index)));
   }
   renderHistoryCreators();
+}
+function renderAutomaticScheduleState() {
+  const enabled = byId("automatic-enabled").checked;
+  byId("automatic-interval").disabled = !enabled;
+  byId("automatic-time").disabled = !enabled;
 }
 async function saveConfig() {
   try {
@@ -140,8 +149,12 @@ byId("settings").addEventListener("submit", async (event) => {
   config.lookback_days = Number(byId("lookback").value);
   config.max_per_creator = Number(byId("maximum").value);
   config.max_height = Number(byId("height").value);
+  config.automatic_scans_enabled = byId("automatic-enabled").checked;
+  config.automatic_scan_interval_days = Number(byId("automatic-interval").value);
+  config.automatic_scan_time = byId("automatic-time").value;
   await saveConfig();
 });
+byId("automatic-enabled").addEventListener("change", renderAutomaticScheduleState);
 byId("scan").addEventListener("click", async () => {
   byId("scan").disabled = true;
   byId("history-download").disabled = true;

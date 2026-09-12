@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, datetime, time as datetime_time, timedelta
 import fcntl
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,7 +20,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 STATE_DIR = Path(os.environ.get("CREATOR_CATCHER_STATE_DIR", "/var/lib/creator-catcher"))
@@ -29,6 +29,7 @@ STATUS_FILE = STATE_DIR / "status.json"
 STATS_FILE = STATE_DIR / "stats.json"
 ARCHIVE_FILE = STATE_DIR / "download-archive.txt"
 LOCK_FILE = STATE_DIR / "scan.lock"
+SCHEDULE_FILE = STATE_DIR / "schedule.json"
 CONFIG_LOCK = threading.RLock()
 STATS_LOCK = threading.RLock()
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
@@ -42,6 +43,9 @@ def default_config() -> dict:
         "lookback_days": 2,
         "max_per_creator": 20,
         "max_height": 1080,
+        "automatic_scans_enabled": True,
+        "automatic_scan_interval_days": 1,
+        "automatic_scan_time": "04:00",
         "creators": [],
     }
 
@@ -108,12 +112,19 @@ def validate_config(candidate: dict) -> dict:
     lookback = int(candidate.get("lookback_days", 2))
     maximum = int(candidate.get("max_per_creator", 20))
     height = int(candidate.get("max_height", 1080))
+    automatic_scans_enabled = bool(candidate.get("automatic_scans_enabled", True))
+    automatic_scan_interval_days = int(candidate.get("automatic_scan_interval_days", 1))
+    automatic_scan_time = str(candidate.get("automatic_scan_time", "04:00")).strip()
     if not 1 <= lookback <= 30:
         raise ValueError("Lookback must be between 1 and 30 days.")
     if not 1 <= maximum <= 100:
         raise ValueError("Maximum videos must be between 1 and 100.")
     if height not in {480, 720, 1080, 1440, 2160}:
         raise ValueError("Resolution must be 480, 720, 1080, 1440, or 2160.")
+    if not 1 <= automatic_scan_interval_days <= 30:
+        raise ValueError("Automatic scan frequency must be between 1 and 30 days.")
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", automatic_scan_time):
+        raise ValueError("Automatic scan time must use 24-hour HH:MM format.")
 
     creators = candidate.get("creators", [])
     if not isinstance(creators, list) or len(creators) > 500:
@@ -138,6 +149,9 @@ def validate_config(candidate: dict) -> dict:
         "lookback_days": lookback,
         "max_per_creator": maximum,
         "max_height": height,
+        "automatic_scans_enabled": automatic_scans_enabled,
+        "automatic_scan_interval_days": automatic_scan_interval_days,
+        "automatic_scan_time": automatic_scan_time,
         "creators": normalized,
     }
 
@@ -470,6 +484,61 @@ def move_pending_videos(config: dict) -> tuple[int, list[str]]:
     return moved, errors
 
 
+def load_schedule_state() -> dict:
+    if not SCHEDULE_FILE.exists():
+        return {}
+    try:
+        loaded = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def next_automatic_scan(
+    config: dict,
+    now: datetime | None = None,
+    last_started_at: datetime | None = None,
+) -> datetime | None:
+    """Return the next due time using the server's local clock."""
+    if not config["automatic_scans_enabled"]:
+        return None
+    now = now or datetime.now()
+    scheduled_time = datetime_time.fromisoformat(config["automatic_scan_time"])
+    if last_started_at is None:
+        raw_last_started = load_schedule_state().get("last_started_at")
+        if isinstance(raw_last_started, str):
+            try:
+                last_started_at = datetime.fromisoformat(raw_last_started)
+            except ValueError:
+                last_started_at = None
+    if last_started_at is None:
+        return datetime.combine(now.date(), scheduled_time)
+    next_date = last_started_at.date() + timedelta(
+        days=config["automatic_scan_interval_days"]
+    )
+    return datetime.combine(next_date, scheduled_time)
+
+
+def automatic_scan_is_due(
+    config: dict,
+    now: datetime | None = None,
+    last_started_at: datetime | None = None,
+) -> bool:
+    now = now or datetime.now()
+    next_scan = next_automatic_scan(config, now, last_started_at)
+    return next_scan is not None and now >= next_scan
+
+
+def scheduled_scan() -> int:
+    config = load_config()
+    now = datetime.now()
+    if not automatic_scan_is_due(config, now):
+        print("Automatic scan is not due.", flush=True)
+        return 0
+    atomic_json_write(SCHEDULE_FILE, {"last_started_at": now.isoformat(timespec="seconds")})
+    return scan()
+
+
 def scan(creator_url: str | None = None, history_years: int | None = None) -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w", encoding="utf-8") as lock:
@@ -768,7 +837,12 @@ def validate_installation() -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=VERSION)
-    parser.add_argument("command", choices=("serve", "scan", "validate"), nargs="?", default="serve")
+    parser.add_argument(
+        "command",
+        choices=("serve", "scan", "scheduled-scan", "validate"),
+        nargs="?",
+        default="serve",
+    )
     parser.add_argument("--creator-url")
     parser.add_argument("--history-years", type=int)
     args = parser.parse_args()
@@ -783,6 +857,8 @@ def main() -> int:
     args = parse_args()
     if args.command == "scan":
         return scan(args.creator_url, args.history_years)
+    if args.command == "scheduled-scan":
+        return scheduled_scan()
     if args.command == "validate":
         return validate_installation()
     return serve()

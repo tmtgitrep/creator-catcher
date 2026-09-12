@@ -37,7 +37,7 @@
       </form>
       <div id="creators" class="creator-list"></div>
     </section>
-    <details class="card history-card">
+    <details class="card history-card collapsible-card">
       <summary><span class="section-title">Download creator history</span></summary>
       <div class="history-content">
         <p>Download every available video from one saved creator within a longer time range. Previously downloaded videos are skipped.</p>
@@ -50,8 +50,9 @@
         <p id="history-message" role="status"></p>
       </div>
     </details>
-    <section class="card">
-      <div class="section-title">Download settings</div>
+    <details class="card settings-card collapsible-card">
+      <summary><span class="section-title">Download settings</span></summary>
+      <div class="settings-content">
       <form id="settings" class="settings-grid">
         <label class="wide">Download directory<input id="download-dir" required></label>
         <label class="wide">Move completed videos to
@@ -65,10 +66,16 @@
         <label>Maximum resolution
           <select id="height"><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="2160">2160p</option></select>
         </label>
+        <div class="settings-divider wide"><span class="section-title">Automatic scan schedule</span></div>
+        <label class="check-label wide"><input id="automatic-enabled" type="checkbox"> Enable automatic scans</label>
+        <label>Run every<input id="automatic-interval" type="number" min="1" max="30" required><span class="field-help">days</span></label>
+        <label>Preferred start time<input id="automatic-time" type="time" required></label>
+        <p class="field-help wide">Uses the Pi's local time. A due scan starts within about five minutes of this time.</p>
         <button type="submit" class="primary">Save settings</button>
       </form>
       <p id="message" role="status"></p>
-    </section>
+      </div>
+    </details>
   </main>
 </body>
 </html>

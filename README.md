@@ -14,6 +14,12 @@ video from one saved creator over the past 1 to 10 years. Historical
 downloads ignore the normal per-creator limit but still respect the resolution,
 archive, metadata, naming, and network-transfer settings.
 
+**Download settings** is also expandable. Its automatic scan controls can turn
+scheduled scans on or off, run them every 1 to 30 days, and choose a preferred
+start time in the Pi's local timezone. The system timer checks for a due scan
+every five minutes, so a scheduled scan normally begins within five minutes of
+the selected time. Manual and history scans are unaffected by this schedule.
+
 ## Development
 
 Run tests with: make test
@@ -31,11 +37,11 @@ Place the official portable yt-dlp executable at vendor/yt-dlp, then run:
 
 Install on Raspberry Pi OS:
 
-    sudo apt install ./creator-catcher_0.4.0_all.deb
+    sudo apt install ./creator-catcher_0.5.0_all.deb
 
 Verify a downloaded release before installing:
 
-    sha256sum -c creator-catcher_0.4.0_all.deb.sha256
+    sha256sum -c creator-catcher_0.5.0_all.deb.sha256
 
 The service initially listens only at 127.0.0.1:8080. Set
 CREATOR_CATCHER_HOST in /etc/default/creator-catcher to the Pi's Tailscale
@@ -103,7 +109,7 @@ media container.
 
 ## Remote access
 
-The web interface has no application-level login in version 0.4.0. Keep it on
+The web interface has no application-level login in version 0.5.0. Keep it on
 a trusted private network. For a Tailscale installation, bind it only to the
 Pi's Tailscale address in /etc/default/creator-catcher; do not expose port 8080
 through the router. Tailnet ACLs should limit access to trusted devices.

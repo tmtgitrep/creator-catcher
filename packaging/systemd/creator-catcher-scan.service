@@ -1,5 +1,5 @@
 [Unit]
-Description=Scan Creator Catcher channels
+Description=Run a due Creator Catcher automatic scan
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ Type=oneshot
 User=creator-catcher
 Group=creator-catcher
 EnvironmentFile=-/etc/default/creator-catcher
-ExecStart=/usr/bin/creator-catcher scan
+ExecStart=/usr/bin/creator-catcher scheduled-scan
 StateDirectory=creator-catcher
 WorkingDirectory=/var/lib/creator-catcher
 NoNewPrivileges=true

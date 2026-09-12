@@ -1,10 +1,11 @@
 [Unit]
-Description=Scan Creator Catcher channels daily
+Description=Check the Creator Catcher automatic scan schedule
 
 [Timer]
-OnCalendar=*-*-* 04:00:00
+OnBootSec=2m
+OnUnitActiveSec=5m
 Persistent=true
-RandomizedDelaySec=15m
+AccuracySec=30s
 
 [Install]
 WantedBy=timers.target

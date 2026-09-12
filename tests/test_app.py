@@ -1,5 +1,5 @@
 import importlib.util
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import tempfile
 import unittest
@@ -28,7 +28,43 @@ class ConfigurationTests(unittest.TestCase):
         result = app.validate_config(candidate)
         self.assertEqual(result["max_height"], 1080)
         self.assertEqual(result["move_to_dir"], "")
+        self.assertTrue(result["automatic_scans_enabled"])
+        self.assertEqual(result["automatic_scan_interval_days"], 1)
+        self.assertEqual(result["automatic_scan_time"], "04:00")
         self.assertTrue(result["creators"][0]["url"].endswith("/videos"))
+
+    def test_validates_automatic_scan_schedule(self):
+        candidate = app.default_config()
+        candidate.update(
+            automatic_scans_enabled=False,
+            automatic_scan_interval_days=7,
+            automatic_scan_time="21:35",
+        )
+        result = app.validate_config(candidate)
+        self.assertFalse(result["automatic_scans_enabled"])
+        self.assertEqual(result["automatic_scan_interval_days"], 7)
+        self.assertEqual(result["automatic_scan_time"], "21:35")
+        candidate["automatic_scan_interval_days"] = 31
+        with self.assertRaisesRegex(ValueError, "between 1 and 30 days"):
+            app.validate_config(candidate)
+        candidate["automatic_scan_interval_days"] = 1
+        candidate["automatic_scan_time"] = "4:00 PM"
+        with self.assertRaisesRegex(ValueError, "24-hour HH:MM"):
+            app.validate_config(candidate)
+
+    def test_automatic_scan_due_uses_interval_and_local_time(self):
+        config = app.default_config()
+        config["automatic_scan_interval_days"] = 3
+        config["automatic_scan_time"] = "04:30"
+        last_started = datetime(2026, 9, 9, 4, 31)
+        self.assertFalse(
+            app.automatic_scan_is_due(config, datetime(2026, 9, 12, 4, 29), last_started)
+        )
+        self.assertTrue(
+            app.automatic_scan_is_due(config, datetime(2026, 9, 12, 4, 30), last_started)
+        )
+        config["automatic_scans_enabled"] = False
+        self.assertIsNone(app.next_automatic_scan(config, datetime(2026, 9, 12, 5, 0)))
 
     def test_validates_move_destination(self):
         candidate = app.default_config()
@@ -251,10 +287,30 @@ class PackagingTests(unittest.TestCase):
         static = PROJECT / "src" / "creator_catcher" / "static"
         markup = (static / "index.html").read_text(encoding="utf-8")
         script = (static / "app.js").read_text(encoding="utf-8")
-        self.assertIn('class="card history-card"', markup)
+        self.assertIn('class="card history-card collapsible-card"', markup)
         self.assertIn('id="history-creator"', markup)
         self.assertIn('id="history-years"', markup)
         self.assertIn('api("/api/history"', script)
+
+    def test_ui_has_expandable_download_and_schedule_settings(self):
+        static = PROJECT / "src" / "creator_catcher" / "static"
+        markup = (static / "index.html").read_text(encoding="utf-8")
+        script = (static / "app.js").read_text(encoding="utf-8")
+        self.assertIn('class="card settings-card collapsible-card"', markup)
+        self.assertIn('id="automatic-enabled"', markup)
+        self.assertIn('id="automatic-interval"', markup)
+        self.assertIn('id="automatic-time"', markup)
+        self.assertIn("config.automatic_scan_interval_days", script)
+
+    def test_timer_checks_app_managed_schedule(self):
+        timer = (PROJECT / "packaging/systemd/creator-catcher-scan.timer").read_text(
+            encoding="utf-8"
+        )
+        service = (PROJECT / "packaging/systemd/creator-catcher-scan.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("OnUnitActiveSec=5m", timer)
+        self.assertIn("ExecStart=/usr/bin/creator-catcher scheduled-scan", service)
 
 if __name__ == "__main__":
     unittest.main()
