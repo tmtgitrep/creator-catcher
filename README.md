@@ -24,7 +24,16 @@ The expandable **Video download log** keeps the latest 500 video records and
 shows separate Download and Transfer indicators. It records new activity from
 version 0.7.0 onward; older downloads are not reconstructed, although an older
 pending file transferred by this version is added to the log. Hover a failed
-indicator to see its error. The log is stored with the other persistent state.
+indicator to see its error. The log initially shows the newest 30 entries;
+**Load more** reveals up to 30 additional entries at a time. The log is stored
+with the other persistent state.
+
+The **Status** panel shows **Video storage**: the total size and count of
+completed video files in the saved **Move completed videos to** directory,
+including creator subfolders and existing videos predating the log. Totals
+refresh in the background about once a minute. Partial transfers, non-video
+files, and symbolic links are excluded. An unavailable or unreadable destination
+is reported as unavailable rather than as an empty directory.
 
 **Download settings** is also expandable. Its automatic scan controls can turn
 scheduled scans on or off, run them every 1 to 30 days, and choose a preferred

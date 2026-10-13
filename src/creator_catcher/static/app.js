@@ -1,6 +1,8 @@
 "use strict";
 let config = null;
 let lastStatusState = null;
+let videoLogEntries = [];
+let videoLogLimit = 30;
 const byId = (id) => document.getElementById(id);
 
 async function api(path, options) {
@@ -78,8 +80,12 @@ function logBadge(status, kind, error) {
 }
 function renderVideoLog(entries) {
   const list = byId("video-log");
-  const items = Array.isArray(entries) ? entries : [];
-  byId("video-log-count").textContent = items.length ? String(items.length) : "";
+  videoLogEntries = Array.isArray(entries) ? entries : [];
+  const items = videoLogEntries.slice(0, videoLogLimit);
+  byId("video-log-count").textContent = items.length ? `${items.length} of ${videoLogEntries.length}` : "";
+  const more = byId("video-log-more");
+  more.hidden = items.length >= videoLogEntries.length;
+  more.textContent = `Load ${Math.min(30, videoLogEntries.length - items.length)} more`;
   list.replaceChildren();
   if (!items.length) {
     const empty = document.createElement("div");
@@ -115,6 +121,35 @@ function renderVideoLog(entries) {
 async function loadVideoLog() {
   const result = await api("/api/video-log");
   renderVideoLog(result.entries);
+}
+byId("video-log-more").addEventListener("click", () => {
+  videoLogLimit += 30;
+  renderVideoLog(videoLogEntries);
+});
+function formatBytes(bytes) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let value = Number(bytes);
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${value.toLocaleString(undefined, {maximumFractionDigits:unit ? 2 : 0})} ${units[unit]}`;
+}
+async function loadStorage() {
+  try {
+    const storage = await api("/api/storage");
+    byId("storage-destination").textContent = storage.destination || "";
+    const total = byId("storage-total");
+    if (storage.state === "ready") {
+      total.textContent = `${formatBytes(storage.total_bytes)} · ${storage.video_count} ${storage.video_count === 1 ? "video" : "videos"}`;
+      total.title = `Updated ${new Date(storage.updated_at * 1000).toLocaleString()}. Refreshes about every minute.`;
+    } else {
+      total.textContent = storage.state === "not_configured" ? "Set “Move completed videos to” to see video storage."
+        : storage.state === "calculating" ? "Calculating video storage…" : "Video storage unavailable";
+      total.title = storage.error || "";
+    }
+  } catch (error) {
+    byId("storage-total").textContent = "Video storage unavailable";
+    byId("storage-total").title = error.message;
+  }
 }
 function renderHistoryCreators() {
   const select = byId("history-creator");
@@ -159,6 +194,7 @@ async function saveConfig() {
   try {
     config = await api("/api/config", requestOptions(config));
     renderConfig(); showMessage("Saved.", false);
+    loadStorage();
   } catch (error) {
     showMessage(error.message, true);
     await loadConfig();
@@ -263,3 +299,5 @@ loadVersion().catch(() => { byId("app-version").textContent = ""; });
 loadVideoLog().catch(() => {});
 pollStatus();
 setInterval(pollStatus, 1000);
+loadStorage();
+setInterval(loadStorage, 5000);

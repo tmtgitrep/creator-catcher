@@ -21,6 +21,11 @@
       <h2 id="status-headline">Loading…</h2>
       <p id="status-detail">Reading scanner status.</p>
       <progress id="progress" max="100" value="0"></progress>
+      <div class="storage-summary">
+        <span class="section-title">Video storage</span>
+        <p id="storage-total">Loading storage total…</p>
+        <p id="storage-destination" class="field-help"></p>
+      </div>
       <details id="scan-errors" hidden>
         <summary id="error-summary">Errors from the last scan</summary>
         <ul id="error-list"></ul>
@@ -30,6 +35,7 @@
       <summary><span class="section-title">Video download log</span><span id="video-log-count" class="summary-count"></span></summary>
       <div class="log-content">
         <div id="video-log" class="video-log"><div class="empty">No video activity logged yet.</div></div>
+        <button id="video-log-more" type="button" hidden>Load 30 more</button>
       </div>
     </details>
     <details class="card creators-card collapsible-card" open>

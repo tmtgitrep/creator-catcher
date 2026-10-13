@@ -43,6 +43,9 @@ input,select { min-width:0; color:var(--text); background:var(--bg); border:1px 
 .creator input[type="checkbox"] { width:18px; height:18px; }
 .download-count { color:var(--muted); font-size:.78rem; font-weight:650; white-space:nowrap; }
 .video-log { display:grid; gap:9px; }
+.storage-summary { margin-top:16px; padding-top:12px; border-top:1px solid var(--border); }
+#storage-destination { overflow-wrap:anywhere; }
+#video-log-more { margin-top:12px; }
 .log-row { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:14px; align-items:center; padding:11px; border:1px solid var(--border); border-radius:10px; }
 .log-info { min-width:0; display:grid; gap:4px; }
 .log-title { color:var(--text); font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-decoration:none; }

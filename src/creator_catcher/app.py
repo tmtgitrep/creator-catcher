@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -37,6 +38,65 @@ VIDEO_LOG_LOCK = threading.RLock()
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 MAX_ERRORS = 100
 MAX_VIDEO_LOG_ENTRIES = 500
+STORAGE_LOCK = threading.Lock()
+STORAGE_CACHE: dict = {}
+STORAGE_REFRESH_SECONDS = 60
+
+
+def measure_video_storage(destination: str) -> dict:
+    """Count completed video bytes without following directory or file links."""
+    total_bytes = 0
+    video_count = 0
+    root = Path(destination)
+    if not root.is_dir():
+        raise OSError(f"Move destination is unavailable: {destination}")
+
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, subdirectories, filenames in os.walk(root, onerror=walk_error):
+        subdirectories[:] = [
+            name for name in subdirectories
+            if not (Path(directory) / name).is_symlink()
+        ]
+        for name in filenames:
+            path = Path(directory) / name
+            if path.suffix.lower() not in VIDEO_EXTENSIONS or path.is_symlink():
+                continue
+            try:
+                metadata = path.stat()
+            except FileNotFoundError:
+                continue  # A file may be removed while the share is being counted.
+            if stat.S_ISREG(metadata.st_mode):
+                total_bytes += metadata.st_size
+                video_count += 1
+    return {"state": "ready", "total_bytes": total_bytes, "video_count": video_count}
+
+
+def refresh_video_storage(destination: str) -> None:
+    try:
+        result = measure_video_storage(destination)
+    except OSError as exc:
+        result = {"state": "unavailable", "error": str(exc)}
+    with STORAGE_LOCK:
+        if STORAGE_CACHE.get("destination") == destination:
+            STORAGE_CACHE.update(result, updated_at=int(time.time()), refreshing=False)
+
+
+def storage_snapshot() -> dict:
+    destination = load_config().get("move_to_dir", "")
+    if not destination:
+        return {"state": "not_configured", "destination": ""}
+    with STORAGE_LOCK:
+        if STORAGE_CACHE.get("destination") != destination:
+            STORAGE_CACHE.clear()
+            STORAGE_CACHE.update(destination=destination, state="calculating", updated_at=0,
+                                 refreshing=False)
+        if (not STORAGE_CACHE["refreshing"]
+                and time.time() - STORAGE_CACHE["updated_at"] >= STORAGE_REFRESH_SECONDS):
+            STORAGE_CACHE["refreshing"] = True
+            threading.Thread(target=refresh_video_storage, args=(destination,), daemon=True).start()
+        return dict(STORAGE_CACHE)
 
 
 def default_config() -> dict:
@@ -970,6 +1030,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json(config_for_api())
         elif path == "/api/status":
             self.send_json(status_snapshot())
+        elif path == "/api/storage":
+            self.send_json(storage_snapshot())
         elif path == "/api/video-log":
             self.send_json({"entries": load_video_log()})
         elif path == "/health":

@@ -3,6 +3,7 @@ from datetime import date, datetime
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SOURCE = Path(__file__).parents[1] / "src" / "creator_catcher" / "app.py"
 PROJECT = Path(__file__).parents[1]
@@ -10,6 +11,55 @@ SPEC = importlib.util.spec_from_file_location("creator_catcher_app", SOURCE)
 app = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(app)
+
+class StorageTests(unittest.TestCase):
+    def test_counts_nested_completed_videos_and_excludes_other_files_and_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            creator = root / "Creator"
+            creator.mkdir()
+            (creator / "one.mp4").write_bytes(b"a" * 123)
+            (creator / "two.MKV").write_bytes(b"b" * 456)
+            (creator / "poster.jpg").write_bytes(b"c" * 10)
+            (creator / ".three.mp4.creator-catcher-part").write_bytes(b"d" * 20)
+            (root / "link.mp4").symlink_to(creator / "one.mp4")
+            (root / "linked-folder").symlink_to(creator, target_is_directory=True)
+            self.assertEqual(app.measure_video_storage(str(root)), {
+                "state": "ready", "total_bytes": 579, "video_count": 2,
+            })
+
+    def test_empty_and_unavailable_destinations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(app.measure_video_storage(directory)["total_bytes"], 0)
+            with self.assertRaises(OSError):
+                app.measure_video_storage(str(Path(directory) / "missing"))
+
+    def test_storage_cache_refreshes_without_starting_duplicate_workers(self):
+        with patch.object(app, "STORAGE_CACHE", {}), \
+                patch.object(app, "load_config", return_value={"move_to_dir": "/videos"}), \
+                patch.object(app.threading, "Thread") as worker:
+            self.assertEqual(app.storage_snapshot()["state"], "calculating")
+            app.storage_snapshot()
+            worker.assert_called_once()
+            with patch.object(app, "measure_video_storage", return_value={
+                "state": "ready", "total_bytes": 12, "video_count": 1,
+            }):
+                app.refresh_video_storage("/videos")
+            self.assertEqual(app.storage_snapshot()["total_bytes"], 12)
+            worker.assert_called_once()
+            app.STORAGE_CACHE["updated_at"] = 0
+            app.storage_snapshot()
+            self.assertEqual(worker.call_count, 2)
+            with patch.object(app, "measure_video_storage", side_effect=PermissionError("denied")):
+                app.refresh_video_storage("/videos")
+            self.assertEqual(app.storage_snapshot()["state"], "unavailable")
+            with patch.object(app, "load_config", return_value={"move_to_dir": "/other"}):
+                changed = app.storage_snapshot()
+                self.assertEqual(changed["state"], "calculating")
+                self.assertNotIn("total_bytes", changed)
+            with patch.object(app, "load_config", return_value={"move_to_dir": ""}):
+                self.assertEqual(app.storage_snapshot()["state"], "not_configured")
+
 
 class ConfigurationTests(unittest.TestCase):
     def test_normalizes_creator_url(self):
